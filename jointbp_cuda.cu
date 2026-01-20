@@ -51,6 +51,36 @@ __device__ DeviceMsg multiply_msg(const DeviceMsg &a, const DeviceMsg &b) {
     return make_msg(a.v0 * b.v0, a.v1 * b.v1, a.v2 * b.v2, a.v3 * b.v3);
 }
 
+__device__ MsgReal shfl_up_real(MsgReal v, int offset, unsigned mask) {
+    return __shfl_up_sync(mask, v, offset);
+}
+
+__device__ MsgReal shfl_down_real(MsgReal v, int offset, unsigned mask) {
+    return __shfl_down_sync(mask, v, offset);
+}
+
+__device__ DeviceMsg warp_reduce_mul(DeviceMsg v, unsigned mask) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        MsgReal o0 = shfl_down_real(v.v0, offset, mask);
+        MsgReal o1 = shfl_down_real(v.v1, offset, mask);
+        MsgReal o2 = shfl_down_real(v.v2, offset, mask);
+        MsgReal o3 = shfl_down_real(v.v3, offset, mask);
+        v.v0 *= o0;
+        v.v1 *= o1;
+        v.v2 *= o2;
+        v.v3 *= o3;
+    }
+    return v;
+}
+
+__device__ DeviceMsg warp_broadcast(DeviceMsg v, unsigned mask) {
+    v.v0 = __shfl_sync(mask, v.v0, 0);
+    v.v1 = __shfl_sync(mask, v.v1, 0);
+    v.v2 = __shfl_sync(mask, v.v2, 0);
+    v.v3 = __shfl_sync(mask, v.v3, 0);
+    return v;
+}
+
 __device__ MsgReal abs_real(MsgReal v) {
 #ifdef USE_CUDA_FP32
     return fabsf(v);
@@ -137,72 +167,47 @@ __global__ void check_update_x_by_check_kernel(
 ) {
     int c = blockIdx.x;
     if (c >= checks) return;
+    int tid = threadIdx.x;
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int deg = end - start;
-    int tid = threadIdx.x;
     if (tid >= deg) return;
-    extern __shared__ MsgReal shared[];
-    MsgReal *q0 = shared;
-    MsgReal *q1 = q0 + deg;
-    MsgReal *pref_even = q1 + deg;
-    MsgReal *pref_odd = pref_even + deg;
-    MsgReal *suff_even = pref_odd + deg;
-    MsgReal *suff_odd = suff_even + deg;
 
+    unsigned mask = (deg >= 32) ? 0xffffffffu : ((1u << deg) - 1u);
     int edge_idx = check_edges[start + tid];
     DeviceMsg m = v2c[edge_idx];
-    q0[tid] = m.v0 + m.v2;
-    q1[tid] = m.v1 + m.v3;
-    __syncthreads();
+    MsgReal even = m.v0 + m.v2;
+    MsgReal odd = m.v1 + m.v3;
 
-    pref_even[tid] = q0[tid];
-    pref_odd[tid] = q1[tid];
-    __syncthreads();
+    MsgReal pref_even = even;
+    MsgReal pref_odd = odd;
     for (int offset = 1; offset < deg; offset <<= 1) {
+        MsgReal prev_even = shfl_up_real(pref_even, offset, mask);
+        MsgReal prev_odd = shfl_up_real(pref_odd, offset, mask);
         if (tid >= offset) {
-            MsgReal a_even = pref_even[tid - offset];
-            MsgReal a_odd = pref_odd[tid - offset];
-            MsgReal b_even = pref_even[tid];
-            MsgReal b_odd = pref_odd[tid];
-            suff_even[tid] = a_even * b_even + a_odd * b_odd;
-            suff_odd[tid] = a_even * b_odd + a_odd * b_even;
-        } else {
-            suff_even[tid] = pref_even[tid];
-            suff_odd[tid] = pref_odd[tid];
+            MsgReal new_even = prev_even * pref_even + prev_odd * pref_odd;
+            MsgReal new_odd = prev_even * pref_odd + prev_odd * pref_even;
+            pref_even = new_even;
+            pref_odd = new_odd;
         }
-        __syncthreads();
-        pref_even[tid] = suff_even[tid];
-        pref_odd[tid] = suff_odd[tid];
-        __syncthreads();
     }
+    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : shfl_up_real(pref_even, 1, mask);
+    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : shfl_up_real(pref_odd, 1, mask);
 
-    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : pref_even[tid - 1];
-    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : pref_odd[tid - 1];
-
-    suff_even[tid] = q0[tid];
-    suff_odd[tid] = q1[tid];
-    __syncthreads();
+    MsgReal suff_even = even;
+    MsgReal suff_odd = odd;
     for (int offset = 1; offset < deg; offset <<= 1) {
+        MsgReal next_even = shfl_down_real(suff_even, offset, mask);
+        MsgReal next_odd = shfl_down_real(suff_odd, offset, mask);
         if (tid + offset < deg) {
-            MsgReal a_even = suff_even[tid];
-            MsgReal a_odd = suff_odd[tid];
-            MsgReal b_even = suff_even[tid + offset];
-            MsgReal b_odd = suff_odd[tid + offset];
-            q0[tid] = a_even * b_even + a_odd * b_odd;
-            q1[tid] = a_even * b_odd + a_odd * b_even;
-        } else {
-            q0[tid] = suff_even[tid];
-            q1[tid] = suff_odd[tid];
+            MsgReal new_even = suff_even * next_even + suff_odd * next_odd;
+            MsgReal new_odd = suff_even * next_odd + suff_odd * next_even;
+            suff_even = new_even;
+            suff_odd = new_odd;
         }
-        __syncthreads();
-        suff_even[tid] = q0[tid];
-        suff_odd[tid] = q1[tid];
-        __syncthreads();
     }
-
-    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : suff_even[tid + 1];
-    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : suff_odd[tid + 1];
+    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : shfl_down_real(suff_even, 1, mask);
+    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : shfl_down_real(suff_odd, 1, mask);
 
     MsgReal p_even = pref_ex_even * suff_ex_even + pref_ex_odd * suff_ex_odd;
     MsgReal p_odd = pref_ex_even * suff_ex_odd + pref_ex_odd * suff_ex_even;
@@ -257,72 +262,47 @@ __global__ void check_update_z_by_check_kernel(
 ) {
     int c = blockIdx.x;
     if (c >= checks) return;
+    int tid = threadIdx.x;
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int deg = end - start;
-    int tid = threadIdx.x;
     if (tid >= deg) return;
-    extern __shared__ MsgReal shared[];
-    MsgReal *q0 = shared;
-    MsgReal *q1 = q0 + deg;
-    MsgReal *pref_even = q1 + deg;
-    MsgReal *pref_odd = pref_even + deg;
-    MsgReal *suff_even = pref_odd + deg;
-    MsgReal *suff_odd = suff_even + deg;
 
+    unsigned mask = (deg >= 32) ? 0xffffffffu : ((1u << deg) - 1u);
     int edge_idx = check_edges[start + tid];
     DeviceMsg m = v2c[edge_idx];
-    q0[tid] = m.v0 + m.v1;
-    q1[tid] = m.v2 + m.v3;
-    __syncthreads();
+    MsgReal even = m.v0 + m.v1;
+    MsgReal odd = m.v2 + m.v3;
 
-    pref_even[tid] = q0[tid];
-    pref_odd[tid] = q1[tid];
-    __syncthreads();
+    MsgReal pref_even = even;
+    MsgReal pref_odd = odd;
     for (int offset = 1; offset < deg; offset <<= 1) {
+        MsgReal prev_even = shfl_up_real(pref_even, offset, mask);
+        MsgReal prev_odd = shfl_up_real(pref_odd, offset, mask);
         if (tid >= offset) {
-            MsgReal a_even = pref_even[tid - offset];
-            MsgReal a_odd = pref_odd[tid - offset];
-            MsgReal b_even = pref_even[tid];
-            MsgReal b_odd = pref_odd[tid];
-            suff_even[tid] = a_even * b_even + a_odd * b_odd;
-            suff_odd[tid] = a_even * b_odd + a_odd * b_even;
-        } else {
-            suff_even[tid] = pref_even[tid];
-            suff_odd[tid] = pref_odd[tid];
+            MsgReal new_even = prev_even * pref_even + prev_odd * pref_odd;
+            MsgReal new_odd = prev_even * pref_odd + prev_odd * pref_even;
+            pref_even = new_even;
+            pref_odd = new_odd;
         }
-        __syncthreads();
-        pref_even[tid] = suff_even[tid];
-        pref_odd[tid] = suff_odd[tid];
-        __syncthreads();
     }
+    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : shfl_up_real(pref_even, 1, mask);
+    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : shfl_up_real(pref_odd, 1, mask);
 
-    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : pref_even[tid - 1];
-    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : pref_odd[tid - 1];
-
-    suff_even[tid] = q0[tid];
-    suff_odd[tid] = q1[tid];
-    __syncthreads();
+    MsgReal suff_even = even;
+    MsgReal suff_odd = odd;
     for (int offset = 1; offset < deg; offset <<= 1) {
+        MsgReal next_even = shfl_down_real(suff_even, offset, mask);
+        MsgReal next_odd = shfl_down_real(suff_odd, offset, mask);
         if (tid + offset < deg) {
-            MsgReal a_even = suff_even[tid];
-            MsgReal a_odd = suff_odd[tid];
-            MsgReal b_even = suff_even[tid + offset];
-            MsgReal b_odd = suff_odd[tid + offset];
-            q0[tid] = a_even * b_even + a_odd * b_odd;
-            q1[tid] = a_even * b_odd + a_odd * b_even;
-        } else {
-            q0[tid] = suff_even[tid];
-            q1[tid] = suff_odd[tid];
+            MsgReal new_even = suff_even * next_even + suff_odd * next_odd;
+            MsgReal new_odd = suff_even * next_odd + suff_odd * next_even;
+            suff_even = new_even;
+            suff_odd = new_odd;
         }
-        __syncthreads();
-        suff_even[tid] = q0[tid];
-        suff_odd[tid] = q1[tid];
-        __syncthreads();
     }
-
-    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : suff_even[tid + 1];
-    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : suff_odd[tid + 1];
+    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : shfl_down_real(suff_even, 1, mask);
+    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : shfl_down_real(suff_odd, 1, mask);
 
     MsgReal p_even = pref_ex_even * suff_ex_even + pref_ex_odd * suff_ex_odd;
     MsgReal p_odd = pref_ex_even * suff_ex_odd + pref_ex_odd * suff_ex_even;
@@ -351,75 +331,96 @@ __global__ void variable_update_kernel(
     double *abs_llr_x,
     double *abs_llr_z
 ) {
-    int v = blockIdx.x * blockDim.x + threadIdx.x;
+    int warp_id = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int warps_per_block = blockDim.x >> 5;
+    int v = blockIdx.x * warps_per_block + warp_id;
     if (v >= nvars) return;
     DeviceMsg total = prior;
     int x_start = x_var_offsets[v];
     int x_end = x_var_offsets[v + 1];
     int z_start = z_var_offsets[v];
     int z_end = z_var_offsets[v + 1];
-    for (int idx = x_start; idx < x_end; ++idx) {
-        total = multiply_msg(total, x_c2v[x_var_edges[idx]]);
-    }
-    for (int idx = z_start; idx < z_end; ++idx) {
-        total = multiply_msg(total, z_c2v[z_var_edges[idx]]);
-    }
-    normalize_msg(total);
-    int best = 0;
-    MsgReal best_val = total.v0;
-    if (total.v1 > best_val) {
-        best_val = total.v1;
-        best = 1;
-    }
-    if (total.v2 > best_val) {
-        best_val = total.v2;
-        best = 2;
-    }
-    if (total.v3 > best_val) {
-        best = 3;
-    }
-    est[v] = best;
-    if (abs_llr_x && abs_llr_z) {
-        const double eps = 1e-300;
-        double px1 = static_cast<double>(total.v1 + total.v3);
-        double px0 = static_cast<double>(total.v0 + total.v2);
-        double pz1 = static_cast<double>(total.v2 + total.v3);
-        double pz0 = static_cast<double>(total.v0 + total.v1);
-        double llr_x = log(fmax(px1, eps)) - log(fmax(px0, eps));
-        double llr_z = log(fmax(pz1, eps)) - log(fmax(pz0, eps));
-        abs_llr_x[v] = fabs(llr_x);
-        abs_llr_z[v] = fabs(llr_z);
-    }
-    if (!freeze_x) {
-        for (int idx = x_start; idx < x_end; ++idx) {
-            int e = x_var_edges[idx];
-            DeviceMsg out = divide_msg(total, x_c2v[e]);
-            normalize_msg(out);
-            DeviceMsg old = x_v2c[e];
-            MsgReal keep = static_cast<MsgReal>(1.0 - damping);
-            MsgReal damp = static_cast<MsgReal>(damping);
-            out.v0 = keep * out.v0 + damp * old.v0;
-            out.v1 = keep * out.v1 + damp * old.v1;
-            out.v2 = keep * out.v2 + damp * old.v2;
-            out.v3 = keep * out.v3 + damp * old.v3;
-            normalize_msg(out);
-            x_v2c[e] = out;
+    int x_deg = x_end - x_start;
+    int z_deg = z_end - z_start;
+    int total_deg = x_deg + z_deg;
+    unsigned mask = 0xffffffffu;
+
+    DeviceMsg local = make_msg(static_cast<MsgReal>(1.0),
+                               static_cast<MsgReal>(1.0),
+                               static_cast<MsgReal>(1.0),
+                               static_cast<MsgReal>(1.0));
+    if (lane < total_deg) {
+        if (lane < x_deg) {
+            local = x_c2v[x_var_edges[x_start + lane]];
+        } else {
+            local = z_c2v[z_var_edges[z_start + lane - x_deg]];
         }
     }
-    if (!freeze_z) {
-        for (int idx = z_start; idx < z_end; ++idx) {
-            int e = z_var_edges[idx];
-            DeviceMsg out = divide_msg(total, z_c2v[e]);
-            normalize_msg(out);
-            DeviceMsg old = z_v2c[e];
-            MsgReal keep = static_cast<MsgReal>(1.0 - damping);
-            MsgReal damp = static_cast<MsgReal>(damping);
-            out.v0 = keep * out.v0 + damp * old.v0;
-            out.v1 = keep * out.v1 + damp * old.v1;
-            out.v2 = keep * out.v2 + damp * old.v2;
-            out.v3 = keep * out.v3 + damp * old.v3;
-            normalize_msg(out);
-            z_v2c[e] = out;
+
+    DeviceMsg prod = warp_reduce_mul(local, mask);
+    if (lane == 0) {
+        total = multiply_msg(total, prod);
+        normalize_msg(total);
+        int best = 0;
+        MsgReal best_val = total.v0;
+        if (total.v1 > best_val) {
+            best_val = total.v1;
+            best = 1;
+        }
+        if (total.v2 > best_val) {
+            best_val = total.v2;
+            best = 2;
+        }
+        if (total.v3 > best_val) {
+            best = 3;
+        }
+        est[v] = best;
+        if (abs_llr_x && abs_llr_z) {
+            const double eps = 1e-300;
+            double px1 = static_cast<double>(total.v1 + total.v3);
+            double px0 = static_cast<double>(total.v0 + total.v2);
+            double pz1 = static_cast<double>(total.v2 + total.v3);
+            double pz0 = static_cast<double>(total.v0 + total.v1);
+            double llr_x = log(fmax(px1, eps)) - log(fmax(px0, eps));
+            double llr_z = log(fmax(pz1, eps)) - log(fmax(pz0, eps));
+            abs_llr_x[v] = fabs(llr_x);
+            abs_llr_z[v] = fabs(llr_z);
+        }
+    }
+    total = warp_broadcast(total, mask);
+
+    if (lane < total_deg) {
+        if (lane < x_deg) {
+            int e = x_var_edges[x_start + lane];
+            if (!freeze_x) {
+                DeviceMsg out = divide_msg(total, x_c2v[e]);
+                normalize_msg(out);
+                DeviceMsg old = x_v2c[e];
+                MsgReal keep = static_cast<MsgReal>(1.0 - damping);
+                MsgReal damp = static_cast<MsgReal>(damping);
+                out.v0 = keep * out.v0 + damp * old.v0;
+                out.v1 = keep * out.v1 + damp * old.v1;
+                out.v2 = keep * out.v2 + damp * old.v2;
+                out.v3 = keep * out.v3 + damp * old.v3;
+                normalize_msg(out);
+                x_v2c[e] = out;
+            }
+        } else {
+            int e = z_var_edges[z_start + lane - x_deg];
+            if (!freeze_z) {
+                DeviceMsg out = divide_msg(total, z_c2v[e]);
+                normalize_msg(out);
+                DeviceMsg old = z_v2c[e];
+                MsgReal keep = static_cast<MsgReal>(1.0 - damping);
+                MsgReal damp = static_cast<MsgReal>(damping);
+                out.v0 = keep * out.v0 + damp * old.v0;
+                out.v1 = keep * out.v1 + damp * old.v1;
+                out.v2 = keep * out.v2 + damp * old.v2;
+                out.v3 = keep * out.v3 + damp * old.v3;
+                normalize_msg(out);
+                z_v2c[e] = out;
+            }
         }
     }
 }
@@ -673,23 +674,24 @@ bool cuda_bp_decode(
     int threads = 256;
     int x_blocks = (ctx->x_edges + threads - 1) / threads;
     int z_blocks = (ctx->z_edges + threads - 1) / threads;
-    int var_blocks = (ctx->nvars + threads - 1) / threads;
+    int warps_per_block = threads / 32;
+    int var_blocks = (ctx->nvars + warps_per_block - 1) / warps_per_block;
     int check_x_blocks = (ctx->mX + threads - 1) / threads;
     int check_z_blocks = (ctx->mZ + threads - 1) / threads;
     int check_x_threads = ctx->max_x_deg > 0 ? ctx->max_x_deg : 1;
     int check_z_threads = ctx->max_z_deg > 0 ? ctx->max_z_deg : 1;
     bool use_prefix_x = true;
     bool use_prefix_z = true;
-    if (check_x_threads > 256) {
+    if (check_x_threads > 32) {
         check_x_threads = 256;
         use_prefix_x = false;
     }
-    if (check_z_threads > 256) {
+    if (check_z_threads > 32) {
         check_z_threads = 256;
         use_prefix_z = false;
     }
-    size_t shared_x_bytes = use_prefix_x ? static_cast<size_t>(ctx->max_x_deg) * 6 * sizeof(MsgReal) : 0;
-    size_t shared_z_bytes = use_prefix_z ? static_cast<size_t>(ctx->max_z_deg) * 6 * sizeof(MsgReal) : 0;
+    size_t shared_x_bytes = 0;
+    size_t shared_z_bytes = 0;
 
     cudaEvent_t kernel_start{};
     cudaEvent_t kernel_stop{};
