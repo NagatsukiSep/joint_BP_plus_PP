@@ -6,8 +6,6 @@
 #include <cmath>
 #include <sstream>
 
-namespace {
-
 struct DeviceMsg {
     double v0;
     double v1;
@@ -15,7 +13,7 @@ struct DeviceMsg {
     double v3;
 };
 
-__device__ DeviceMsg make_msg(double a, double b, double c, double d) {
+__host__ __device__ DeviceMsg make_msg(double a, double b, double c, double d) {
     DeviceMsg m;
     m.v0 = a;
     m.v1 = b;
@@ -23,6 +21,8 @@ __device__ DeviceMsg make_msg(double a, double b, double c, double d) {
     m.v3 = d;
     return m;
 }
+
+namespace {
 
 __device__ void normalize_msg(DeviceMsg &m) {
     double sum = m.v0 + m.v1 + m.v2 + m.v3;
@@ -285,6 +285,8 @@ __global__ void freeze_msgs_kernel(
     c2v[e] = msg;
 }
 
+}  // namespace
+
 struct CudaBPContext {
     int nvars = 0;
     int mX = 0;
@@ -315,6 +317,8 @@ struct CudaBPContext {
     DeviceMsg *d_z_v2c = nullptr;
     DeviceMsg *d_z_c2v = nullptr;
 };
+
+namespace {
 
 bool check_cuda(cudaError_t err, std::string *error_out, const char *ctx) {
     if (err == cudaSuccess) return true;
