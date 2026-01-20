@@ -171,13 +171,16 @@ __global__ void check_update_x_by_check_kernel(
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int deg = end - start;
-    if (tid >= deg) return;
-
-    unsigned mask = (deg >= 32) ? 0xffffffffu : ((1u << deg) - 1u);
-    int edge_idx = check_edges[start + tid];
-    DeviceMsg m = v2c[edge_idx];
-    MsgReal even = m.v0 + m.v2;
-    MsgReal odd = m.v1 + m.v3;
+    unsigned mask = 0xffffffffu;
+    int edge_idx = -1;
+    MsgReal even = static_cast<MsgReal>(1.0);
+    MsgReal odd = static_cast<MsgReal>(0.0);
+    if (tid < deg) {
+        edge_idx = check_edges[start + tid];
+        DeviceMsg m = v2c[edge_idx];
+        even = m.v0 + m.v2;
+        odd = m.v1 + m.v3;
+    }
 
     MsgReal pref_even = even;
     MsgReal pref_odd = odd;
@@ -215,7 +218,9 @@ __global__ void check_update_x_by_check_kernel(
     MsgReal val1 = (sx[c] == 0) ? p_odd : p_even;
     DeviceMsg out = make_msg(val0, val1, val0, val1);
     normalize_msg(out);
-    c2v[edge_idx] = out;
+    if (tid < deg) {
+        c2v[edge_idx] = out;
+    }
 }
 
 __global__ void check_update_z_kernel(
@@ -266,13 +271,16 @@ __global__ void check_update_z_by_check_kernel(
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int deg = end - start;
-    if (tid >= deg) return;
-
-    unsigned mask = (deg >= 32) ? 0xffffffffu : ((1u << deg) - 1u);
-    int edge_idx = check_edges[start + tid];
-    DeviceMsg m = v2c[edge_idx];
-    MsgReal even = m.v0 + m.v1;
-    MsgReal odd = m.v2 + m.v3;
+    unsigned mask = 0xffffffffu;
+    int edge_idx = -1;
+    MsgReal even = static_cast<MsgReal>(1.0);
+    MsgReal odd = static_cast<MsgReal>(0.0);
+    if (tid < deg) {
+        edge_idx = check_edges[start + tid];
+        DeviceMsg m = v2c[edge_idx];
+        even = m.v0 + m.v1;
+        odd = m.v2 + m.v3;
+    }
 
     MsgReal pref_even = even;
     MsgReal pref_odd = odd;
@@ -310,7 +318,9 @@ __global__ void check_update_z_by_check_kernel(
     MsgReal val1 = (sz[c] == 0) ? p_odd : p_even;
     DeviceMsg out = make_msg(val0, val0, val1, val1);
     normalize_msg(out);
-    c2v[edge_idx] = out;
+    if (tid < deg) {
+        c2v[edge_idx] = out;
+    }
 }
 
 __global__ void variable_update_kernel(
