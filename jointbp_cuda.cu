@@ -110,6 +110,68 @@ __global__ void check_update_x_kernel(
     c2v[e] = out;
 }
 
+__global__ void check_update_x_by_check_kernel(
+    int checks,
+    const int *check_offsets,
+    const int *check_edges,
+    const int *sx,
+    const DeviceMsg *v2c,
+    DeviceMsg *c2v
+) {
+    int c = blockIdx.x;
+    if (c >= checks) return;
+    int start = check_offsets[c];
+    int end = check_offsets[c + 1];
+    int deg = end - start;
+    int tid = threadIdx.x;
+    if (tid >= deg) return;
+    extern __shared__ MsgReal shared[];
+    MsgReal *q0 = shared;
+    MsgReal *q1 = q0 + deg;
+    MsgReal *pref_even = q1 + deg;
+    MsgReal *pref_odd = pref_even + deg;
+    MsgReal *suff_even = pref_odd + deg;
+    MsgReal *suff_odd = suff_even + deg;
+
+    int edge_idx = check_edges[start + tid];
+    DeviceMsg m = v2c[edge_idx];
+    q0[tid] = m.v0 + m.v2;
+    q1[tid] = m.v1 + m.v3;
+    __syncthreads();
+
+    if (tid == 0) {
+        MsgReal even = static_cast<MsgReal>(1.0);
+        MsgReal odd = static_cast<MsgReal>(0.0);
+        for (int i = 0; i < deg; ++i) {
+            pref_even[i] = even;
+            pref_odd[i] = odd;
+            MsgReal new_even = even * q0[i] + odd * q1[i];
+            MsgReal new_odd = even * q1[i] + odd * q0[i];
+            even = new_even;
+            odd = new_odd;
+        }
+        even = static_cast<MsgReal>(1.0);
+        odd = static_cast<MsgReal>(0.0);
+        for (int i = deg - 1; i >= 0; --i) {
+            suff_even[i] = even;
+            suff_odd[i] = odd;
+            MsgReal new_even = even * q0[i] + odd * q1[i];
+            MsgReal new_odd = even * q1[i] + odd * q0[i];
+            even = new_even;
+            odd = new_odd;
+        }
+    }
+    __syncthreads();
+
+    MsgReal p_even = pref_even[tid] * suff_even[tid] + pref_odd[tid] * suff_odd[tid];
+    MsgReal p_odd = pref_even[tid] * suff_odd[tid] + pref_odd[tid] * suff_even[tid];
+    MsgReal val0 = (sx[c] == 0) ? p_even : p_odd;
+    MsgReal val1 = (sx[c] == 0) ? p_odd : p_even;
+    DeviceMsg out = make_msg(val0, val1, val0, val1);
+    normalize_msg(out);
+    c2v[edge_idx] = out;
+}
+
 __global__ void check_update_z_kernel(
     int edges,
     const int *check_offsets,
@@ -142,6 +204,68 @@ __global__ void check_update_z_kernel(
     DeviceMsg out = make_msg(val0, val0, val1, val1);
     normalize_msg(out);
     c2v[e] = out;
+}
+
+__global__ void check_update_z_by_check_kernel(
+    int checks,
+    const int *check_offsets,
+    const int *check_edges,
+    const int *sz,
+    const DeviceMsg *v2c,
+    DeviceMsg *c2v
+) {
+    int c = blockIdx.x;
+    if (c >= checks) return;
+    int start = check_offsets[c];
+    int end = check_offsets[c + 1];
+    int deg = end - start;
+    int tid = threadIdx.x;
+    if (tid >= deg) return;
+    extern __shared__ MsgReal shared[];
+    MsgReal *q0 = shared;
+    MsgReal *q1 = q0 + deg;
+    MsgReal *pref_even = q1 + deg;
+    MsgReal *pref_odd = pref_even + deg;
+    MsgReal *suff_even = pref_odd + deg;
+    MsgReal *suff_odd = suff_even + deg;
+
+    int edge_idx = check_edges[start + tid];
+    DeviceMsg m = v2c[edge_idx];
+    q0[tid] = m.v0 + m.v1;
+    q1[tid] = m.v2 + m.v3;
+    __syncthreads();
+
+    if (tid == 0) {
+        MsgReal even = static_cast<MsgReal>(1.0);
+        MsgReal odd = static_cast<MsgReal>(0.0);
+        for (int i = 0; i < deg; ++i) {
+            pref_even[i] = even;
+            pref_odd[i] = odd;
+            MsgReal new_even = even * q0[i] + odd * q1[i];
+            MsgReal new_odd = even * q1[i] + odd * q0[i];
+            even = new_even;
+            odd = new_odd;
+        }
+        even = static_cast<MsgReal>(1.0);
+        odd = static_cast<MsgReal>(0.0);
+        for (int i = deg - 1; i >= 0; --i) {
+            suff_even[i] = even;
+            suff_odd[i] = odd;
+            MsgReal new_even = even * q0[i] + odd * q1[i];
+            MsgReal new_odd = even * q1[i] + odd * q0[i];
+            even = new_even;
+            odd = new_odd;
+        }
+    }
+    __syncthreads();
+
+    MsgReal p_even = pref_even[tid] * suff_even[tid] + pref_odd[tid] * suff_odd[tid];
+    MsgReal p_odd = pref_even[tid] * suff_odd[tid] + pref_odd[tid] * suff_even[tid];
+    MsgReal val0 = (sz[c] == 0) ? p_even : p_odd;
+    MsgReal val1 = (sz[c] == 0) ? p_odd : p_even;
+    DeviceMsg out = make_msg(val0, val0, val1, val1);
+    normalize_msg(out);
+    c2v[edge_idx] = out;
 }
 
 __global__ void variable_update_kernel(
@@ -281,6 +405,14 @@ __global__ void mismatch_count_kernel(int n, const int *a, const int *b, int *ou
     }
 }
 
+__global__ void compare_syndrome_kernel(int n, const int *a, const int *b, int *syn_all) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    if (a[idx] != b[idx]) {
+        atomicAnd(syn_all, 0);
+    }
+}
+
 __global__ void freeze_msgs_kernel(
     int edges,
     const int *edge_var,
@@ -306,6 +438,8 @@ struct CudaBPContext {
     int mZ = 0;
     int x_edges = 0;
     int z_edges = 0;
+    int max_x_deg = 0;
+    int max_z_deg = 0;
     int *d_x_check_offsets = nullptr;
     int *d_x_check_edges = nullptr;
     int *d_x_edge_var = nullptr;
@@ -325,6 +459,8 @@ struct CudaBPContext {
     int *d_est = nullptr;
     int *d_mismatch_x = nullptr;
     int *d_mismatch_z = nullptr;
+    int *d_syn_x = nullptr;
+    int *d_syn_z = nullptr;
     DeviceMsg *d_x_v2c = nullptr;
     DeviceMsg *d_x_c2v = nullptr;
     DeviceMsg *d_z_v2c = nullptr;
@@ -367,6 +503,16 @@ CudaBPContext *cuda_bp_create(const CudaBPGraph &graph, int device_id, std::stri
     ctx->mZ = graph.mZ;
     ctx->x_edges = graph.x_edges;
     ctx->z_edges = graph.z_edges;
+    ctx->max_x_deg = 0;
+    for (int c = 0; c < graph.mX; ++c) {
+        int deg = graph.x_check_offsets[c + 1] - graph.x_check_offsets[c];
+        if (deg > ctx->max_x_deg) ctx->max_x_deg = deg;
+    }
+    ctx->max_z_deg = 0;
+    for (int c = 0; c < graph.mZ; ++c) {
+        int deg = graph.z_check_offsets[c + 1] - graph.z_check_offsets[c];
+        if (deg > ctx->max_z_deg) ctx->max_z_deg = deg;
+    }
 
     if (!copy_int_array(graph.x_check_offsets, &ctx->d_x_check_offsets, error_out, "x_check_offsets")) return nullptr;
     if (!copy_int_array(graph.x_check_edges, &ctx->d_x_check_edges, error_out, "x_check_edges")) return nullptr;
@@ -389,6 +535,8 @@ CudaBPContext *cuda_bp_create(const CudaBPGraph &graph, int device_id, std::stri
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_est), sizeof(int) * graph.nvars), error_out, "est")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_mismatch_x), sizeof(int)), error_out, "mismatch_x")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_mismatch_z), sizeof(int)), error_out, "mismatch_z")) return nullptr;
+    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_syn_x), sizeof(int)), error_out, "syn_x")) return nullptr;
+    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_syn_z), sizeof(int)), error_out, "syn_z")) return nullptr;
 
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_x_v2c), sizeof(DeviceMsg) * graph.x_edges), error_out, "x_v2c")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_x_c2v), sizeof(DeviceMsg) * graph.x_edges), error_out, "x_c2v")) return nullptr;
@@ -419,6 +567,8 @@ void cuda_bp_destroy(CudaBPContext *ctx) {
     cudaFree(ctx->d_est);
     cudaFree(ctx->d_mismatch_x);
     cudaFree(ctx->d_mismatch_z);
+    cudaFree(ctx->d_syn_x);
+    cudaFree(ctx->d_syn_z);
     cudaFree(ctx->d_x_v2c);
     cudaFree(ctx->d_x_c2v);
     cudaFree(ctx->d_z_v2c);
@@ -465,6 +615,20 @@ bool cuda_bp_decode(
     int var_blocks = (ctx->nvars + threads - 1) / threads;
     int check_x_blocks = (ctx->mX + threads - 1) / threads;
     int check_z_blocks = (ctx->mZ + threads - 1) / threads;
+    int check_x_threads = ctx->max_x_deg > 0 ? ctx->max_x_deg : 1;
+    int check_z_threads = ctx->max_z_deg > 0 ? ctx->max_z_deg : 1;
+    bool use_prefix_x = true;
+    bool use_prefix_z = true;
+    if (check_x_threads > 256) {
+        check_x_threads = 256;
+        use_prefix_x = false;
+    }
+    if (check_z_threads > 256) {
+        check_z_threads = 256;
+        use_prefix_z = false;
+    }
+    size_t shared_x_bytes = use_prefix_x ? static_cast<size_t>(ctx->max_x_deg) * 6 * sizeof(MsgReal) : 0;
+    size_t shared_z_bytes = use_prefix_z ? static_cast<size_t>(ctx->max_z_deg) * 6 * sizeof(MsgReal) : 0;
 
     init_messages_kernel<<<x_blocks, threads>>>(ctx->x_edges, ctx->d_x_v2c, ctx->d_x_c2v, d_prior);
     init_messages_kernel<<<z_blocks, threads>>>(ctx->z_edges, ctx->d_z_v2c, ctx->d_z_c2v, d_prior);
@@ -477,26 +641,48 @@ bool cuda_bp_decode(
     int iter = 0;
     for (; iter < max_iter; ++iter) {
         if (!freeze_x) {
-            check_update_x_kernel<<<x_blocks, threads>>>(
-                ctx->x_edges,
-                ctx->d_x_check_offsets,
-                ctx->d_x_check_edges,
-                ctx->d_x_edge_check,
-                ctx->d_sx,
-                ctx->d_x_v2c,
-                ctx->d_x_c2v
-            );
+            if (use_prefix_x) {
+                check_update_x_by_check_kernel<<<ctx->mX, check_x_threads, shared_x_bytes>>>(
+                    ctx->mX,
+                    ctx->d_x_check_offsets,
+                    ctx->d_x_check_edges,
+                    ctx->d_sx,
+                    ctx->d_x_v2c,
+                    ctx->d_x_c2v
+                );
+            } else {
+                check_update_x_kernel<<<x_blocks, threads>>>(
+                    ctx->x_edges,
+                    ctx->d_x_check_offsets,
+                    ctx->d_x_check_edges,
+                    ctx->d_x_edge_check,
+                    ctx->d_sx,
+                    ctx->d_x_v2c,
+                    ctx->d_x_c2v
+                );
+            }
         }
         if (!freeze_z) {
-            check_update_z_kernel<<<z_blocks, threads>>>(
-                ctx->z_edges,
-                ctx->d_z_check_offsets,
-                ctx->d_z_check_edges,
-                ctx->d_z_edge_check,
-                ctx->d_sz,
-                ctx->d_z_v2c,
-                ctx->d_z_c2v
-            );
+            if (use_prefix_z) {
+                check_update_z_by_check_kernel<<<ctx->mZ, check_z_threads, shared_z_bytes>>>(
+                    ctx->mZ,
+                    ctx->d_z_check_offsets,
+                    ctx->d_z_check_edges,
+                    ctx->d_sz,
+                    ctx->d_z_v2c,
+                    ctx->d_z_c2v
+                );
+            } else {
+                check_update_z_kernel<<<z_blocks, threads>>>(
+                    ctx->z_edges,
+                    ctx->d_z_check_offsets,
+                    ctx->d_z_check_edges,
+                    ctx->d_z_edge_check,
+                    ctx->d_sz,
+                    ctx->d_z_v2c,
+                    ctx->d_z_c2v
+                );
+            }
         }
         variable_update_kernel<<<var_blocks, threads>>>(
             ctx->nvars,
@@ -540,19 +726,19 @@ bool cuda_bp_decode(
             );
             if (!check_cuda(cudaGetLastError(), error_out, "syndrome_kernel")) return false;
 
-            cudaMemset(ctx->d_mismatch_x, 0, sizeof(int));
-            cudaMemset(ctx->d_mismatch_z, 0, sizeof(int));
-            mismatch_count_kernel<<<check_x_blocks, threads>>>(ctx->mX, ctx->d_sx_hat, ctx->d_sx, ctx->d_mismatch_x);
-            mismatch_count_kernel<<<check_z_blocks, threads>>>(ctx->mZ, ctx->d_sz_hat, ctx->d_sz, ctx->d_mismatch_z);
-            if (!check_cuda(cudaGetLastError(), error_out, "mismatch_count_kernel")) return false;
+            cudaMemset(ctx->d_syn_x, 1, sizeof(int));
+            cudaMemset(ctx->d_syn_z, 1, sizeof(int));
+            compare_syndrome_kernel<<<check_x_blocks, threads>>>(ctx->mX, ctx->d_sx_hat, ctx->d_sx, ctx->d_syn_x);
+            compare_syndrome_kernel<<<check_z_blocks, threads>>>(ctx->mZ, ctx->d_sz_hat, ctx->d_sz, ctx->d_syn_z);
+            if (!check_cuda(cudaGetLastError(), error_out, "compare_syndrome_kernel")) return false;
 
-            int mismatch_x = 0;
-            int mismatch_z = 0;
-            if (!check_cuda(cudaMemcpy(&mismatch_x, ctx->d_mismatch_x, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy mismatch_x")) return false;
-            if (!check_cuda(cudaMemcpy(&mismatch_z, ctx->d_mismatch_z, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy mismatch_z")) return false;
+            int syn_x_flag = 0;
+            int syn_z_flag = 0;
+            if (!check_cuda(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_x")) return false;
+            if (!check_cuda(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_z")) return false;
 
-            bool syn_x = (mismatch_x == 0);
-            bool syn_z = (mismatch_z == 0);
+            bool syn_x = syn_x_flag != 0;
+            bool syn_z = syn_z_flag != 0;
             syn_all = syn_x && syn_z;
             last_checked_iter = iter;
             if (freeze_syn) {
@@ -593,17 +779,17 @@ bool cuda_bp_decode(
         );
         if (!check_cuda(cudaGetLastError(), error_out, "syndrome_kernel_final")) return false;
 
-        cudaMemset(ctx->d_mismatch_x, 0, sizeof(int));
-        cudaMemset(ctx->d_mismatch_z, 0, sizeof(int));
-        mismatch_count_kernel<<<check_x_blocks, threads>>>(ctx->mX, ctx->d_sx_hat, ctx->d_sx, ctx->d_mismatch_x);
-        mismatch_count_kernel<<<check_z_blocks, threads>>>(ctx->mZ, ctx->d_sz_hat, ctx->d_sz, ctx->d_mismatch_z);
-        if (!check_cuda(cudaGetLastError(), error_out, "mismatch_count_kernel_final")) return false;
+        cudaMemset(ctx->d_syn_x, 1, sizeof(int));
+        cudaMemset(ctx->d_syn_z, 1, sizeof(int));
+        compare_syndrome_kernel<<<check_x_blocks, threads>>>(ctx->mX, ctx->d_sx_hat, ctx->d_sx, ctx->d_syn_x);
+        compare_syndrome_kernel<<<check_z_blocks, threads>>>(ctx->mZ, ctx->d_sz_hat, ctx->d_sz, ctx->d_syn_z);
+        if (!check_cuda(cudaGetLastError(), error_out, "compare_syndrome_kernel_final")) return false;
 
-        int mismatch_x = 0;
-        int mismatch_z = 0;
-        if (!check_cuda(cudaMemcpy(&mismatch_x, ctx->d_mismatch_x, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy mismatch_x_final")) return false;
-        if (!check_cuda(cudaMemcpy(&mismatch_z, ctx->d_mismatch_z, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy mismatch_z_final")) return false;
-        syn_all = (mismatch_x == 0) && (mismatch_z == 0);
+        int syn_x_flag = 0;
+        int syn_z_flag = 0;
+        if (!check_cuda(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_x_final")) return false;
+        if (!check_cuda(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_z_final")) return false;
+        syn_all = (syn_x_flag != 0) && (syn_z_flag != 0);
     }
 
     out.est.assign(ctx->nvars, 0);
