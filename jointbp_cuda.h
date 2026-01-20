@@ -33,6 +33,9 @@ struct CudaBPResult {
     std::vector<int> est;
     int iterations = 0;
     bool syndrome_match = false;
+    double kernel_ms = 0.0;
+    double memcpy_ms = 0.0;
+    double host_ms = 0.0;
 };
 
 struct CudaBPContext;

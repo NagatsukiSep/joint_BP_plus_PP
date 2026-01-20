@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 #include <cmath>
+#include <chrono>
 #include <sstream>
 
 #ifdef USE_CUDA_FP32
@@ -588,6 +589,16 @@ bool cuda_bp_decode(
     CudaBPResult &out,
     std::string *error_out
 ) {
+    auto host_start = std::chrono::steady_clock::now();
+    double memcpy_ms = 0.0;
+    auto time_memcpy = [&](cudaError_t err, std::string *err_out, const char *ctx_label) -> bool {
+        auto t0 = std::chrono::steady_clock::now();
+        bool ok = check_cuda(err, err_out, ctx_label);
+        auto t1 = std::chrono::steady_clock::now();
+        memcpy_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        return ok;
+    };
+
     if (!ctx) {
         if (error_out) *error_out = "CUDA context not initialized";
         return false;
@@ -596,10 +607,12 @@ bool cuda_bp_decode(
         if (error_out) *error_out = "CUDA input syndrome size mismatch";
         return false;
     }
-    if (!check_cuda(cudaMemcpy(ctx->d_sx, sx.data(), sizeof(int) * sx.size(), cudaMemcpyHostToDevice), error_out, "copy sx")) {
+    if (!time_memcpy(cudaMemcpy(ctx->d_sx, sx.data(), sizeof(int) * sx.size(), cudaMemcpyHostToDevice),
+                     error_out, "copy sx")) {
         return false;
     }
-    if (!check_cuda(cudaMemcpy(ctx->d_sz, sz.data(), sizeof(int) * sz.size(), cudaMemcpyHostToDevice), error_out, "copy sz")) {
+    if (!time_memcpy(cudaMemcpy(ctx->d_sz, sz.data(), sizeof(int) * sz.size(), cudaMemcpyHostToDevice),
+                     error_out, "copy sz")) {
         return false;
     }
     if (check_interval <= 0) {
@@ -629,6 +642,12 @@ bool cuda_bp_decode(
     }
     size_t shared_x_bytes = use_prefix_x ? static_cast<size_t>(ctx->max_x_deg) * 6 * sizeof(MsgReal) : 0;
     size_t shared_z_bytes = use_prefix_z ? static_cast<size_t>(ctx->max_z_deg) * 6 * sizeof(MsgReal) : 0;
+
+    cudaEvent_t kernel_start{};
+    cudaEvent_t kernel_stop{};
+    if (!check_cuda(cudaEventCreate(&kernel_start), error_out, "cudaEventCreate start")) return false;
+    if (!check_cuda(cudaEventCreate(&kernel_stop), error_out, "cudaEventCreate stop")) return false;
+    if (!check_cuda(cudaEventRecord(kernel_start), error_out, "cudaEventRecord start")) return false;
 
     init_messages_kernel<<<x_blocks, threads>>>(ctx->x_edges, ctx->d_x_v2c, ctx->d_x_c2v, d_prior);
     init_messages_kernel<<<z_blocks, threads>>>(ctx->z_edges, ctx->d_z_v2c, ctx->d_z_c2v, d_prior);
@@ -734,8 +753,10 @@ bool cuda_bp_decode(
 
             int syn_x_flag = 0;
             int syn_z_flag = 0;
-            if (!check_cuda(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_x")) return false;
-            if (!check_cuda(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_z")) return false;
+            if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
+                             error_out, "copy syn_x")) return false;
+            if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
+                             error_out, "copy syn_z")) return false;
 
             bool syn_x = syn_x_flag != 0;
             bool syn_z = syn_z_flag != 0;
@@ -787,17 +808,35 @@ bool cuda_bp_decode(
 
         int syn_x_flag = 0;
         int syn_z_flag = 0;
-        if (!check_cuda(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_x_final")) return false;
-        if (!check_cuda(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost), error_out, "copy syn_z_final")) return false;
+        if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
+                         error_out, "copy syn_x_final")) return false;
+        if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
+                         error_out, "copy syn_z_final")) return false;
         syn_all = (syn_x_flag != 0) && (syn_z_flag != 0);
     }
 
     out.est.assign(ctx->nvars, 0);
-    if (!check_cuda(cudaMemcpy(out.est.data(), ctx->d_est, sizeof(int) * ctx->nvars, cudaMemcpyDeviceToHost), error_out, "copy est")) {
+    if (!time_memcpy(cudaMemcpy(out.est.data(), ctx->d_est, sizeof(int) * ctx->nvars, cudaMemcpyDeviceToHost),
+                     error_out, "copy est")) {
         return false;
     }
     out.iterations = iter + 1;
     out.syndrome_match = syn_all;
+    float kernel_ms = 0.0f;
+    if (!check_cuda(cudaEventRecord(kernel_stop), error_out, "cudaEventRecord stop")) return false;
+    if (!check_cuda(cudaEventSynchronize(kernel_stop), error_out, "cudaEventSync stop")) return false;
+    if (!check_cuda(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop), error_out, "cudaEventElapsedTime")) {
+        return false;
+    }
+    cudaEventDestroy(kernel_start);
+    cudaEventDestroy(kernel_stop);
+
+    out.kernel_ms = kernel_ms;
+    out.memcpy_ms = memcpy_ms;
+    double total_ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - host_start)
+                          .count();
+    out.host_ms = std::max(0.0, total_ms - memcpy_ms - static_cast<double>(kernel_ms));
     return true;
 }
 

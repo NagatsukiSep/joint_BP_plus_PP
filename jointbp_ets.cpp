@@ -1930,6 +1930,10 @@ struct JointBPResult {
     std::vector<int> flip_z_history;
     std::vector<std::vector<int>> flip_x_window;
     std::vector<std::vector<int>> flip_z_window;
+    bool used_cuda = false;
+    double cuda_kernel_ms = 0.0;
+    double cuda_memcpy_ms = 0.0;
+    double cuda_host_ms = 0.0;
 };
 
 static JointBPResult joint_bp_decode(
@@ -4592,7 +4596,11 @@ static void report_progress(
     long long total_iters,
     double elapsed_sec,
     long long k_value,
-    double avg_latency_sec
+    double avg_latency_sec,
+    bool has_cuda_timings,
+    double avg_cuda_kernel_ms,
+    double avg_cuda_memcpy_ms,
+    double avg_cuda_host_ms
 ) {
     if (trials_done <= 0) return;
     double fer = static_cast<double>(failures) / static_cast<double>(trials_done);
@@ -4632,6 +4640,13 @@ static void report_progress(
         {"stab_success", std::to_string(stab_success)},
         {"pp_success", std::to_string(pp_success)},
     });
+    if (has_cuda_timings) {
+        append_lines({
+            {"cuda_k_ms", format_double_fixed(avg_cuda_kernel_ms, 2)},
+            {"cuda_cp_ms", format_double_fixed(avg_cuda_memcpy_ms, 2)},
+            {"cuda_h_ms", format_double_fixed(avg_cuda_host_ms, 2)}
+        });
+    }
     append_lines({
         {"pp_rate", format_double_fixed(pp_rate, 4)},
         {"pp_ets", std::to_string(ets_pp_success)},
@@ -5405,6 +5420,10 @@ int main(int argc, char **argv) {
                 res.iterations = cuda_res.iterations;
                 res.syndrome_match = cuda_res.syndrome_match;
                 res.bp_syndrome_match = cuda_res.syndrome_match;
+                res.used_cuda = true;
+                res.cuda_kernel_ms = cuda_res.kernel_ms;
+                res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
                 res = joint_bp_decode(
@@ -5758,6 +5777,10 @@ int main(int argc, char **argv) {
     long long last_progress_logged = 0;
     double latency_sum_sec = 0.0;
     long long latency_samples = 0;
+    double cuda_kernel_ms_sum = 0.0;
+    double cuda_memcpy_ms_sum = 0.0;
+    double cuda_host_ms_sum = 0.0;
+    long long cuda_samples = 0;
     std::vector<long long> ets_used_counts(ets_labels.size(), 0);
     auto record_ets_labels = [&](const std::vector<std::string> &labels) {
         for (const auto &label : labels) {
@@ -5818,6 +5841,10 @@ int main(int argc, char **argv) {
                 res.iterations = cuda_res.iterations;
                 res.syndrome_match = cuda_res.syndrome_match;
                 res.bp_syndrome_match = cuda_res.syndrome_match;
+                res.used_cuda = true;
+                res.cuda_kernel_ms = cuda_res.kernel_ms;
+                res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
                 res = joint_bp_decode(
@@ -6076,6 +6103,12 @@ int main(int argc, char **argv) {
                                  .count();
         latency_sum_sec += latency_sec;
         latency_samples++;
+        if (res.used_cuda) {
+            cuda_kernel_ms_sum += res.cuda_kernel_ms;
+            cuda_memcpy_ms_sum += res.cuda_memcpy_ms;
+            cuda_host_ms_sum += res.cuda_host_ms;
+            cuda_samples++;
+        }
         if (pp_success_this && enable_log_files) {
             if (!ensure_dir(log_dir)) {
                 std::cerr << "Failed to create log directory: " << log_dir << "\n";
@@ -6221,9 +6254,14 @@ int main(int argc, char **argv) {
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - start).count();
             double avg_latency_sec = (latency_samples > 0) ? (latency_sum_sec / latency_samples) : 0.0;
+            bool has_cuda_timings = cuda_samples > 0;
+            double avg_cuda_kernel_ms = has_cuda_timings ? (cuda_kernel_ms_sum / cuda_samples) : 0.0;
+            double avg_cuda_memcpy_ms = has_cuda_timings ? (cuda_memcpy_ms_sum / cuda_samples) : 0.0;
+            double avg_cuda_host_ms = has_cuda_timings ? (cuda_host_ms_sum / cuda_samples) : 0.0;
             report_progress(done, failures, bp_failures, pp_success, ets_saves, flip_pp_success,
                             osd_pp_success, stab_success, ets_used, ets_labels, ets_used_counts,
-                            total_iters, elapsed, k, avg_latency_sec);
+                            total_iters, elapsed, k, avg_latency_sec, has_cuda_timings,
+                            avg_cuda_kernel_ms, avg_cuda_memcpy_ms, avg_cuda_host_ms);
         }
         if (progress_every > 0 && (done % progress_every == 0)) {
             auto now = std::chrono::steady_clock::now();
