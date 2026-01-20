@@ -51,6 +51,22 @@ __device__ DeviceMsg multiply_msg(const DeviceMsg &a, const DeviceMsg &b) {
     return make_msg(a.v0 * b.v0, a.v1 * b.v1, a.v2 * b.v2, a.v3 * b.v3);
 }
 
+__device__ MsgReal abs_real(MsgReal v) {
+#ifdef USE_CUDA_FP32
+    return fabsf(v);
+#else
+    return fabs(v);
+#endif
+}
+
+__device__ DeviceMsg divide_msg(const DeviceMsg &num, const DeviceMsg &den) {
+    const MsgReal eps = static_cast<MsgReal>(1e-20);
+    return make_msg(num.v0 / (abs_real(den.v0) + eps),
+                    num.v1 / (abs_real(den.v1) + eps),
+                    num.v2 / (abs_real(den.v2) + eps),
+                    num.v3 / (abs_real(den.v3) + eps));
+}
+
 __device__ int xbit(int state) {
     return (state == 1 || state == 3) ? 1 : 0;
 }
@@ -140,32 +156,56 @@ __global__ void check_update_x_by_check_kernel(
     q1[tid] = m.v1 + m.v3;
     __syncthreads();
 
-    if (tid == 0) {
-        MsgReal even = static_cast<MsgReal>(1.0);
-        MsgReal odd = static_cast<MsgReal>(0.0);
-        for (int i = 0; i < deg; ++i) {
-            pref_even[i] = even;
-            pref_odd[i] = odd;
-            MsgReal new_even = even * q0[i] + odd * q1[i];
-            MsgReal new_odd = even * q1[i] + odd * q0[i];
-            even = new_even;
-            odd = new_odd;
-        }
-        even = static_cast<MsgReal>(1.0);
-        odd = static_cast<MsgReal>(0.0);
-        for (int i = deg - 1; i >= 0; --i) {
-            suff_even[i] = even;
-            suff_odd[i] = odd;
-            MsgReal new_even = even * q0[i] + odd * q1[i];
-            MsgReal new_odd = even * q1[i] + odd * q0[i];
-            even = new_even;
-            odd = new_odd;
-        }
-    }
+    pref_even[tid] = q0[tid];
+    pref_odd[tid] = q1[tid];
     __syncthreads();
+    for (int offset = 1; offset < deg; offset <<= 1) {
+        if (tid >= offset) {
+            MsgReal a_even = pref_even[tid - offset];
+            MsgReal a_odd = pref_odd[tid - offset];
+            MsgReal b_even = pref_even[tid];
+            MsgReal b_odd = pref_odd[tid];
+            suff_even[tid] = a_even * b_even + a_odd * b_odd;
+            suff_odd[tid] = a_even * b_odd + a_odd * b_even;
+        } else {
+            suff_even[tid] = pref_even[tid];
+            suff_odd[tid] = pref_odd[tid];
+        }
+        __syncthreads();
+        pref_even[tid] = suff_even[tid];
+        pref_odd[tid] = suff_odd[tid];
+        __syncthreads();
+    }
 
-    MsgReal p_even = pref_even[tid] * suff_even[tid] + pref_odd[tid] * suff_odd[tid];
-    MsgReal p_odd = pref_even[tid] * suff_odd[tid] + pref_odd[tid] * suff_even[tid];
+    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : pref_even[tid - 1];
+    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : pref_odd[tid - 1];
+
+    suff_even[tid] = q0[tid];
+    suff_odd[tid] = q1[tid];
+    __syncthreads();
+    for (int offset = 1; offset < deg; offset <<= 1) {
+        if (tid + offset < deg) {
+            MsgReal a_even = suff_even[tid];
+            MsgReal a_odd = suff_odd[tid];
+            MsgReal b_even = suff_even[tid + offset];
+            MsgReal b_odd = suff_odd[tid + offset];
+            q0[tid] = a_even * b_even + a_odd * b_odd;
+            q1[tid] = a_even * b_odd + a_odd * b_even;
+        } else {
+            q0[tid] = suff_even[tid];
+            q1[tid] = suff_odd[tid];
+        }
+        __syncthreads();
+        suff_even[tid] = q0[tid];
+        suff_odd[tid] = q1[tid];
+        __syncthreads();
+    }
+
+    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : suff_even[tid + 1];
+    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : suff_odd[tid + 1];
+
+    MsgReal p_even = pref_ex_even * suff_ex_even + pref_ex_odd * suff_ex_odd;
+    MsgReal p_odd = pref_ex_even * suff_ex_odd + pref_ex_odd * suff_ex_even;
     MsgReal val0 = (sx[c] == 0) ? p_even : p_odd;
     MsgReal val1 = (sx[c] == 0) ? p_odd : p_even;
     DeviceMsg out = make_msg(val0, val1, val0, val1);
@@ -236,32 +276,56 @@ __global__ void check_update_z_by_check_kernel(
     q1[tid] = m.v2 + m.v3;
     __syncthreads();
 
-    if (tid == 0) {
-        MsgReal even = static_cast<MsgReal>(1.0);
-        MsgReal odd = static_cast<MsgReal>(0.0);
-        for (int i = 0; i < deg; ++i) {
-            pref_even[i] = even;
-            pref_odd[i] = odd;
-            MsgReal new_even = even * q0[i] + odd * q1[i];
-            MsgReal new_odd = even * q1[i] + odd * q0[i];
-            even = new_even;
-            odd = new_odd;
-        }
-        even = static_cast<MsgReal>(1.0);
-        odd = static_cast<MsgReal>(0.0);
-        for (int i = deg - 1; i >= 0; --i) {
-            suff_even[i] = even;
-            suff_odd[i] = odd;
-            MsgReal new_even = even * q0[i] + odd * q1[i];
-            MsgReal new_odd = even * q1[i] + odd * q0[i];
-            even = new_even;
-            odd = new_odd;
-        }
-    }
+    pref_even[tid] = q0[tid];
+    pref_odd[tid] = q1[tid];
     __syncthreads();
+    for (int offset = 1; offset < deg; offset <<= 1) {
+        if (tid >= offset) {
+            MsgReal a_even = pref_even[tid - offset];
+            MsgReal a_odd = pref_odd[tid - offset];
+            MsgReal b_even = pref_even[tid];
+            MsgReal b_odd = pref_odd[tid];
+            suff_even[tid] = a_even * b_even + a_odd * b_odd;
+            suff_odd[tid] = a_even * b_odd + a_odd * b_even;
+        } else {
+            suff_even[tid] = pref_even[tid];
+            suff_odd[tid] = pref_odd[tid];
+        }
+        __syncthreads();
+        pref_even[tid] = suff_even[tid];
+        pref_odd[tid] = suff_odd[tid];
+        __syncthreads();
+    }
 
-    MsgReal p_even = pref_even[tid] * suff_even[tid] + pref_odd[tid] * suff_odd[tid];
-    MsgReal p_odd = pref_even[tid] * suff_odd[tid] + pref_odd[tid] * suff_even[tid];
+    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : pref_even[tid - 1];
+    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : pref_odd[tid - 1];
+
+    suff_even[tid] = q0[tid];
+    suff_odd[tid] = q1[tid];
+    __syncthreads();
+    for (int offset = 1; offset < deg; offset <<= 1) {
+        if (tid + offset < deg) {
+            MsgReal a_even = suff_even[tid];
+            MsgReal a_odd = suff_odd[tid];
+            MsgReal b_even = suff_even[tid + offset];
+            MsgReal b_odd = suff_odd[tid + offset];
+            q0[tid] = a_even * b_even + a_odd * b_odd;
+            q1[tid] = a_even * b_odd + a_odd * b_even;
+        } else {
+            q0[tid] = suff_even[tid];
+            q1[tid] = suff_odd[tid];
+        }
+        __syncthreads();
+        suff_even[tid] = q0[tid];
+        suff_odd[tid] = q1[tid];
+        __syncthreads();
+    }
+
+    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : suff_even[tid + 1];
+    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : suff_odd[tid + 1];
+
+    MsgReal p_even = pref_ex_even * suff_ex_even + pref_ex_odd * suff_ex_odd;
+    MsgReal p_odd = pref_ex_even * suff_ex_odd + pref_ex_odd * suff_ex_even;
     MsgReal val0 = (sz[c] == 0) ? p_even : p_odd;
     MsgReal val1 = (sz[c] == 0) ? p_odd : p_even;
     DeviceMsg out = make_msg(val0, val0, val1, val1);
@@ -329,15 +393,7 @@ __global__ void variable_update_kernel(
     if (!freeze_x) {
         for (int idx = x_start; idx < x_end; ++idx) {
             int e = x_var_edges[idx];
-            DeviceMsg out = prior;
-            for (int idx2 = x_start; idx2 < x_end; ++idx2) {
-                int e2 = x_var_edges[idx2];
-                if (e2 == e) continue;
-                out = multiply_msg(out, x_c2v[e2]);
-            }
-            for (int idx2 = z_start; idx2 < z_end; ++idx2) {
-                out = multiply_msg(out, z_c2v[z_var_edges[idx2]]);
-            }
+            DeviceMsg out = divide_msg(total, x_c2v[e]);
             normalize_msg(out);
             DeviceMsg old = x_v2c[e];
             MsgReal keep = static_cast<MsgReal>(1.0 - damping);
@@ -353,15 +409,7 @@ __global__ void variable_update_kernel(
     if (!freeze_z) {
         for (int idx = z_start; idx < z_end; ++idx) {
             int e = z_var_edges[idx];
-            DeviceMsg out = prior;
-            for (int idx2 = x_start; idx2 < x_end; ++idx2) {
-                out = multiply_msg(out, x_c2v[x_var_edges[idx2]]);
-            }
-            for (int idx2 = z_start; idx2 < z_end; ++idx2) {
-                int e2 = z_var_edges[idx2];
-                if (e2 == e) continue;
-                out = multiply_msg(out, z_c2v[e2]);
-            }
+            DeviceMsg out = divide_msg(total, z_c2v[e]);
             normalize_msg(out);
             DeviceMsg old = z_v2c[e];
             MsgReal keep = static_cast<MsgReal>(1.0 - damping);
