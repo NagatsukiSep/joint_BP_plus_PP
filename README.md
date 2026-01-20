@@ -48,13 +48,19 @@ nvcc -O2 -std=c++17 -DUSE_CUDA -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
 ```
 
 CUDA mode currently accelerates the core BP loop and requires `--no-pp` (post-processing disabled).
+To trade precision for speed, you can build with FP32 messages:
+
+```sh
+nvcc -O2 -std=c++17 -DUSE_CUDA -DUSE_CUDA_FP32 -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
+```
+
 Use `--cuda` (and optionally `--cuda-device`) to enable it:
 
 ```sh
 ./jointbp_ets \
   --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt \
   --simulate --p 0.05 --trials 1000 --max-iter 50 \
-  --no-pp --cuda --cuda-device 0
+  --no-pp --cuda --cuda-device 0 --cuda-check-interval 5
 ```
 
 ## Quick start
