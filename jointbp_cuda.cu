@@ -31,7 +31,7 @@ __host__ __device__ DeviceMsg make_msg(MsgReal a, MsgReal b, MsgReal c, MsgReal 
 
 namespace {
 
-__device__ __forceinline__ void normalize_msg(DeviceMsg &m) {
+__device__ inline void normalize_msg(DeviceMsg &m) {
     MsgReal sum = m.v0 + m.v1 + m.v2 + m.v3;
     if (sum <= 0.0) {
         m.v0 = 0.25;
@@ -47,11 +47,11 @@ __device__ __forceinline__ void normalize_msg(DeviceMsg &m) {
     m.v3 *= inv;
 }
 
-__device__ __forceinline__ DeviceMsg multiply_msg(const DeviceMsg &a, const DeviceMsg &b) {
+__device__ inline DeviceMsg multiply_msg(const DeviceMsg &a, const DeviceMsg &b) {
     return make_msg(a.v0 * b.v0, a.v1 * b.v1, a.v2 * b.v2, a.v3 * b.v3);
 }
 
-__device__ __forceinline__ MsgReal abs_real(MsgReal v) {
+__device__ inline MsgReal abs_real(MsgReal v) {
 #ifdef USE_CUDA_FP32
     return fabsf(v);
 #else
@@ -59,7 +59,7 @@ __device__ __forceinline__ MsgReal abs_real(MsgReal v) {
 #endif
 }
 
-__device__ __forceinline__ DeviceMsg divide_msg(const DeviceMsg &num, const DeviceMsg &den) {
+__device__ inline DeviceMsg divide_msg(const DeviceMsg &num, const DeviceMsg &den) {
     const MsgReal eps = static_cast<MsgReal>(1e-20);
     return make_msg(num.v0 / (abs_real(den.v0) + eps),
                     num.v1 / (abs_real(den.v1) + eps),
@@ -67,19 +67,19 @@ __device__ __forceinline__ DeviceMsg divide_msg(const DeviceMsg &num, const Devi
                     num.v3 / (abs_real(den.v3) + eps));
 }
 
-__device__ __forceinline__ int xbit(int state) {
+__device__ inline int xbit(int state) {
     return (state == 1 || state == 3) ? 1 : 0;
 }
 
-__device__ __forceinline__ int zbit(int state) {
+__device__ inline int zbit(int state) {
     return (state == 2 || state == 3) ? 1 : 0;
 }
 
-__device__ __forceinline__ DeviceMsg det_msg_xbit(int bit) {
+__device__ inline DeviceMsg det_msg_xbit(int bit) {
     return bit ? make_msg(0.0, 0.5, 0.0, 0.5) : make_msg(0.5, 0.0, 0.5, 0.0);
 }
 
-__device__ __forceinline__ DeviceMsg det_msg_zbit(int bit) {
+__device__ inline DeviceMsg det_msg_zbit(int bit) {
     return bit ? make_msg(0.0, 0.0, 0.5, 0.5) : make_msg(0.5, 0.5, 0.0, 0.0);
 }
 
