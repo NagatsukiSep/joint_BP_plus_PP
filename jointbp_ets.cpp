@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <system_error>
 #include <optional>
 #include <random>
@@ -21,6 +22,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "jointbp_cuda.h"
 
 #if defined(_WIN32)
 #include <io.h>
@@ -47,6 +50,14 @@ struct Params {
 };
 
 using Msg = std::array<double, 4>;
+
+struct CudaCtxDeleter {
+    void operator()(CudaBPContext *ctx) const {
+        cuda_bp_destroy(ctx);
+    }
+};
+
+using CudaCtxPtr = std::unique_ptr<CudaBPContext, CudaCtxDeleter>;
 
 static long long mod_norm(long long x, long long m) {
     long long r = x % m;
@@ -921,6 +932,87 @@ static std::vector<std::vector<EdgeRef>> build_var_adjacency(
         }
     }
     return var_to_checks;
+}
+
+static CudaBPGraph build_cuda_graph(
+    const std::vector<std::vector<int>> &x_checks,
+    const std::vector<std::vector<int>> &z_checks,
+    const std::vector<std::vector<EdgeRef>> &var_to_x,
+    const std::vector<std::vector<EdgeRef>> &var_to_z,
+    int nvars
+) {
+    CudaBPGraph graph;
+    graph.nvars = nvars;
+    graph.mX = static_cast<int>(x_checks.size());
+    graph.mZ = static_cast<int>(z_checks.size());
+
+    graph.x_check_offsets.resize(graph.mX + 1, 0);
+    std::vector<std::vector<int>> x_edge_index(graph.mX);
+    int x_edges = 0;
+    for (int c = 0; c < graph.mX; ++c) {
+        graph.x_check_offsets[c] = x_edges;
+        int deg = static_cast<int>(x_checks[c].size());
+        x_edge_index[c].resize(deg);
+        for (int i = 0; i < deg; ++i) {
+            graph.x_check_edges.push_back(x_edges);
+            graph.x_edge_var.push_back(x_checks[c][i]);
+            graph.x_edge_check.push_back(c);
+            graph.x_edge_pos.push_back(i);
+            x_edge_index[c][i] = x_edges;
+            x_edges++;
+        }
+    }
+    graph.x_check_offsets[graph.mX] = x_edges;
+    graph.x_edges = x_edges;
+
+    graph.x_var_offsets.resize(nvars + 1, 0);
+    graph.x_var_edges.reserve(x_edges);
+    int x_var_cursor = 0;
+    for (int v = 0; v < nvars; ++v) {
+        graph.x_var_offsets[v] = x_var_cursor;
+        for (const auto &e : var_to_x[v]) {
+            if (e.check < 0 || e.check >= graph.mX) continue;
+            if (e.pos < 0 || e.pos >= static_cast<int>(x_edge_index[e.check].size())) continue;
+            graph.x_var_edges.push_back(x_edge_index[e.check][e.pos]);
+            x_var_cursor++;
+        }
+    }
+    graph.x_var_offsets[nvars] = x_var_cursor;
+
+    graph.z_check_offsets.resize(graph.mZ + 1, 0);
+    std::vector<std::vector<int>> z_edge_index(graph.mZ);
+    int z_edges = 0;
+    for (int c = 0; c < graph.mZ; ++c) {
+        graph.z_check_offsets[c] = z_edges;
+        int deg = static_cast<int>(z_checks[c].size());
+        z_edge_index[c].resize(deg);
+        for (int i = 0; i < deg; ++i) {
+            graph.z_check_edges.push_back(z_edges);
+            graph.z_edge_var.push_back(z_checks[c][i]);
+            graph.z_edge_check.push_back(c);
+            graph.z_edge_pos.push_back(i);
+            z_edge_index[c][i] = z_edges;
+            z_edges++;
+        }
+    }
+    graph.z_check_offsets[graph.mZ] = z_edges;
+    graph.z_edges = z_edges;
+
+    graph.z_var_offsets.resize(nvars + 1, 0);
+    graph.z_var_edges.reserve(z_edges);
+    int z_var_cursor = 0;
+    for (int v = 0; v < nvars; ++v) {
+        graph.z_var_offsets[v] = z_var_cursor;
+        for (const auto &e : var_to_z[v]) {
+            if (e.check < 0 || e.check >= graph.mZ) continue;
+            if (e.pos < 0 || e.pos >= static_cast<int>(z_edge_index[e.check].size())) continue;
+            graph.z_var_edges.push_back(z_edge_index[e.check][e.pos]);
+            z_var_cursor++;
+        }
+    }
+    graph.z_var_offsets[nvars] = z_var_cursor;
+
+    return graph;
 }
 
 struct DegreeStats {
@@ -1838,6 +1930,10 @@ struct JointBPResult {
     std::vector<int> flip_z_history;
     std::vector<std::vector<int>> flip_x_window;
     std::vector<std::vector<int>> flip_z_window;
+    bool used_cuda = false;
+    double cuda_kernel_ms = 0.0;
+    double cuda_memcpy_ms = 0.0;
+    double cuda_host_ms = 0.0;
 };
 
 static JointBPResult joint_bp_decode(
@@ -2279,16 +2375,27 @@ static JointBPResult joint_bp_decode(
                     q0[i] = m[0] + m[2];
                     q1[i] = m[1] + m[3];
                 }
+                std::vector<double> pref_even(deg + 1, 0.0), pref_odd(deg + 1, 0.0);
+                std::vector<double> suf_even(deg + 1, 0.0), suf_odd(deg + 1, 0.0);
+                pref_even[0] = 1.0;
+                pref_odd[0] = 0.0;
                 for (int i = 0; i < deg; ++i) {
-                    double p_even = 1.0;
-                    double p_odd = 0.0;
-                    for (int j = 0; j < deg; ++j) {
-                        if (j == i) continue;
-                        double new_even = p_even * q0[j] + p_odd * q1[j];
-                        double new_odd = p_even * q1[j] + p_odd * q0[j];
-                        p_even = new_even;
-                        p_odd = new_odd;
-                    }
+                    double new_even = pref_even[i] * q0[i] + pref_odd[i] * q1[i];
+                    double new_odd = pref_even[i] * q1[i] + pref_odd[i] * q0[i];
+                    pref_even[i + 1] = new_even;
+                    pref_odd[i + 1] = new_odd;
+                }
+                suf_even[deg] = 1.0;
+                suf_odd[deg] = 0.0;
+                for (int i = deg - 1; i >= 0; --i) {
+                    double new_even = suf_even[i + 1] * q0[i] + suf_odd[i + 1] * q1[i];
+                    double new_odd = suf_even[i + 1] * q1[i] + suf_odd[i + 1] * q0[i];
+                    suf_even[i] = new_even;
+                    suf_odd[i] = new_odd;
+                }
+                for (int i = 0; i < deg; ++i) {
+                    double p_even = pref_even[i] * suf_even[i + 1] + pref_odd[i] * suf_odd[i + 1];
+                    double p_odd = pref_even[i] * suf_odd[i + 1] + pref_odd[i] * suf_even[i + 1];
                     double val0 = (sx[c] == 0) ? p_even : p_odd;
                     double val1 = (sx[c] == 0) ? p_odd : p_even;
                     Msg out{val0, val1, val0, val1};
@@ -2307,16 +2414,27 @@ static JointBPResult joint_bp_decode(
                     q0[i] = m[0] + m[1];
                     q1[i] = m[2] + m[3];
                 }
+                std::vector<double> pref_even(deg + 1, 0.0), pref_odd(deg + 1, 0.0);
+                std::vector<double> suf_even(deg + 1, 0.0), suf_odd(deg + 1, 0.0);
+                pref_even[0] = 1.0;
+                pref_odd[0] = 0.0;
                 for (int i = 0; i < deg; ++i) {
-                    double p_even = 1.0;
-                    double p_odd = 0.0;
-                    for (int j = 0; j < deg; ++j) {
-                        if (j == i) continue;
-                        double new_even = p_even * q0[j] + p_odd * q1[j];
-                        double new_odd = p_even * q1[j] + p_odd * q0[j];
-                        p_even = new_even;
-                        p_odd = new_odd;
-                    }
+                    double new_even = pref_even[i] * q0[i] + pref_odd[i] * q1[i];
+                    double new_odd = pref_even[i] * q1[i] + pref_odd[i] * q0[i];
+                    pref_even[i + 1] = new_even;
+                    pref_odd[i + 1] = new_odd;
+                }
+                suf_even[deg] = 1.0;
+                suf_odd[deg] = 0.0;
+                for (int i = deg - 1; i >= 0; --i) {
+                    double new_even = suf_even[i + 1] * q0[i] + suf_odd[i + 1] * q1[i];
+                    double new_odd = suf_even[i + 1] * q1[i] + suf_odd[i + 1] * q0[i];
+                    suf_even[i] = new_even;
+                    suf_odd[i] = new_odd;
+                }
+                for (int i = 0; i < deg; ++i) {
+                    double p_even = pref_even[i] * suf_even[i + 1] + pref_odd[i] * suf_odd[i + 1];
+                    double p_odd = pref_even[i] * suf_odd[i + 1] + pref_odd[i] * suf_even[i + 1];
                     double val0 = (sz[c] == 0) ? p_even : p_odd;
                     double val1 = (sz[c] == 0) ? p_odd : p_even;
                     Msg out{val0, val0, val1, val1};
@@ -2327,13 +2445,30 @@ static JointBPResult joint_bp_decode(
         }
 
         for (int v = 0; v < nvars; ++v) {
-            Msg total = prior;
-            for (const auto &e : var_to_x[v]) {
-                total = multiply_msg(total, x_c2v[e.check][e.pos]);
+            const auto &x_edges = var_to_x[v];
+            const auto &z_edges = var_to_z[v];
+            const Msg msg_identity{1.0, 1.0, 1.0, 1.0};
+            std::vector<Msg> pref_x(x_edges.size() + 1, msg_identity);
+            std::vector<Msg> suf_x(x_edges.size() + 1, msg_identity);
+            std::vector<Msg> pref_z(z_edges.size() + 1, msg_identity);
+            std::vector<Msg> suf_z(z_edges.size() + 1, msg_identity);
+            for (size_t i = 0; i < x_edges.size(); ++i) {
+                const auto &e = x_edges[i];
+                pref_x[i + 1] = multiply_msg(pref_x[i], x_c2v[e.check][e.pos]);
             }
-            for (const auto &e : var_to_z[v]) {
-                total = multiply_msg(total, z_c2v[e.check][e.pos]);
+            for (size_t i = x_edges.size(); i-- > 0;) {
+                const auto &e = x_edges[i];
+                suf_x[i] = multiply_msg(suf_x[i + 1], x_c2v[e.check][e.pos]);
             }
+            for (size_t i = 0; i < z_edges.size(); ++i) {
+                const auto &e = z_edges[i];
+                pref_z[i + 1] = multiply_msg(pref_z[i], z_c2v[e.check][e.pos]);
+            }
+            for (size_t i = z_edges.size(); i-- > 0;) {
+                const auto &e = z_edges[i];
+                suf_z[i] = multiply_msg(suf_z[i + 1], z_c2v[e.check][e.pos]);
+            }
+            Msg total = multiply_msg(prior, multiply_msg(pref_x.back(), pref_z.back()));
             normalize_msg(total);
 
             int best = 0;
@@ -2354,30 +2489,26 @@ static JointBPResult joint_bp_decode(
             }
 
             if (!freeze_x_active) {
-                for (const auto &e : var_to_x[v]) {
+                for (size_t i = 0; i < x_edges.size(); ++i) {
                     Msg out = prior;
-                    for (const auto &e2 : var_to_x[v]) {
-                        if (e2.check == e.check && e2.pos == e.pos) continue;
-                        out = multiply_msg(out, x_c2v[e2.check][e2.pos]);
-                    }
-                    for (const auto &e2 : var_to_z[v]) {
-                        out = multiply_msg(out, z_c2v[e2.check][e2.pos]);
-                    }
+                    Msg x_excl = multiply_msg(pref_x[i], suf_x[i + 1]);
+                    Msg z_all = pref_z.back();
+                    out = multiply_msg(out, x_excl);
+                    out = multiply_msg(out, z_all);
                     normalize_msg(out);
+                    const auto &e = x_edges[i];
                     x_v2c[e.check][e.pos] = scaled_mix(out, x_v2c[e.check][e.pos], damping);
                 }
             }
             if (!freeze_z_active) {
-                for (const auto &e : var_to_z[v]) {
+                for (size_t i = 0; i < z_edges.size(); ++i) {
                     Msg out = prior;
-                    for (const auto &e2 : var_to_x[v]) {
-                        out = multiply_msg(out, x_c2v[e2.check][e2.pos]);
-                    }
-                    for (const auto &e2 : var_to_z[v]) {
-                        if (e2.check == e.check && e2.pos == e.pos) continue;
-                        out = multiply_msg(out, z_c2v[e2.check][e2.pos]);
-                    }
+                    Msg x_all = pref_x.back();
+                    Msg z_excl = multiply_msg(pref_z[i], suf_z[i + 1]);
+                    out = multiply_msg(out, x_all);
+                    out = multiply_msg(out, z_excl);
                     normalize_msg(out);
+                    const auto &e = z_edges[i];
                     z_v2c[e.check][e.pos] = scaled_mix(out, z_v2c[e.check][e.pos], damping);
                 }
             }
@@ -4500,7 +4631,11 @@ static void report_progress(
     long long total_iters,
     double elapsed_sec,
     long long k_value,
-    double avg_latency_sec
+    double avg_latency_sec,
+    bool has_cuda_timings,
+    double avg_cuda_kernel_ms,
+    double avg_cuda_memcpy_ms,
+    double avg_cuda_host_ms
 ) {
     if (trials_done <= 0) return;
     double fer = static_cast<double>(failures) / static_cast<double>(trials_done);
@@ -4540,6 +4675,13 @@ static void report_progress(
         {"stab_success", std::to_string(stab_success)},
         {"pp_success", std::to_string(pp_success)},
     });
+    if (has_cuda_timings) {
+        append_lines({
+            {"cuda_k_ms", format_double_fixed(avg_cuda_kernel_ms, 2)},
+            {"cuda_cp_ms", format_double_fixed(avg_cuda_memcpy_ms, 2)},
+            {"cuda_h_ms", format_double_fixed(avg_cuda_host_ms, 2)}
+        });
+    }
     append_lines({
         {"pp_rate", format_double_fixed(pp_rate, 4)},
         {"pp_ets", std::to_string(ets_pp_success)},
@@ -4618,6 +4760,11 @@ static void print_usage(const char *prog) {
     std::cerr << "  --report-ets    Print detailed ETS application status.\n";
     std::cerr << "  --est FILE      Write estimated error vector (trials=1 only)\n";
 
+    print_help_section("CUDA Acceleration");
+    std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
+    std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
+    std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
+
     print_help_section("ETS Files");
     std::cerr << "  --ets6-x FILE --ets6-z FILE\n";
     std::cerr << "  --ets12-x FILE --ets12-z FILE\n";
@@ -4682,6 +4829,9 @@ int main(int argc, char **argv) {
     bool report_ets = false;
     long long trial_index = -1;
     bool enable_pp = true;
+    bool use_cuda = false;
+    int cuda_device = 0;
+    int cuda_check_interval = 1;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
 
@@ -4779,6 +4929,17 @@ int main(int argc, char **argv) {
             progress_tsv_path = argv[++i];
         } else if (arg == "--no-pp") {
             enable_pp = false;
+        } else if (arg == "--cuda") {
+            use_cuda = true;
+        } else if (arg == "--cuda-device") {
+            need(1);
+            cuda_device = std::stoi(argv[++i]);
+        } else if (arg == "--cuda-check-interval") {
+            need(1);
+            cuda_check_interval = std::stoi(argv[++i]);
+            if (cuda_check_interval <= 0) {
+                cuda_check_interval = 1;
+            }
         } else if (arg == "--trial-index") {
             need(1);
             trial_index = std::stoll(argv[++i]);
@@ -5198,6 +5359,20 @@ int main(int argc, char **argv) {
     }
     const CycleIndex *cycles_ptr = cycles_index.any_loaded ? &cycles_index : nullptr;
 
+    bool cuda_allowed = use_cuda && !enable_pp && !verbose && !verbose_all && !report_ets;
+    if (use_cuda && !cuda_allowed) {
+        std::cerr << "CUDA BP requires --no-pp and no verbose/report-ets; falling back to CPU.\n";
+    }
+    CudaCtxPtr cuda_ctx;
+    if (cuda_allowed) {
+        CudaBPGraph cuda_graph = build_cuda_graph(x_checks, z_checks, var_to_x, var_to_z, nvars);
+        std::string cuda_error;
+        cuda_ctx.reset(cuda_bp_create(cuda_graph, cuda_device, &cuda_error));
+        if (!cuda_ctx) {
+            std::cerr << "CUDA init failed: " << cuda_error << " (falling back to CPU)\n";
+        }
+    }
+
     std::vector<int> sx;
     std::vector<int> sz;
     std::vector<int> err;
@@ -5266,13 +5441,43 @@ int main(int argc, char **argv) {
         std::vector<std::string> pp_log_lines;
         auto latency_start = std::chrono::steady_clock::now();
         auto t_start = latency_start;
-        auto res = joint_bp_decode(
-            x_checks, z_checks, var_to_x, var_to_z,
-            sx, sz, prior, max_iter, flip_hist_window, freeze_syn, damping,
-            verbose, verbose_all, enable_pp, enable_pp ? &pp_ctx : nullptr, truth_ptr,
-            need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
-            &pp_log_lines
-        );
+        JointBPResult res;
+        if (cuda_ctx) {
+            CudaBPResult cuda_res;
+            CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
+            std::string cuda_error;
+            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter, cuda_check_interval,
+                                     freeze_syn, damping, cuda_res, &cuda_error);
+            if (!ok) {
+                std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
+            } else {
+                res.est = std::move(cuda_res.est);
+                res.iterations = cuda_res.iterations;
+                res.syndrome_match = cuda_res.syndrome_match;
+                res.bp_syndrome_match = cuda_res.syndrome_match;
+                res.used_cuda = true;
+                res.cuda_kernel_ms = cuda_res.kernel_ms;
+                res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_host_ms = cuda_res.host_ms;
+            }
+            if (!ok) {
+                res = joint_bp_decode(
+                    x_checks, z_checks, var_to_x, var_to_z,
+                    sx, sz, prior, max_iter, flip_hist_window, freeze_syn, damping,
+                    verbose, verbose_all, enable_pp, enable_pp ? &pp_ctx : nullptr, truth_ptr,
+                    need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
+                    &pp_log_lines
+                );
+            }
+        } else {
+            res = joint_bp_decode(
+                x_checks, z_checks, var_to_x, var_to_z,
+                sx, sz, prior, max_iter, flip_hist_window, freeze_syn, damping,
+                verbose, verbose_all, enable_pp, enable_pp ? &pp_ctx : nullptr, truth_ptr,
+                need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
+                &pp_log_lines
+            );
+        }
         double elapsed_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
 
         bool ok = res.syndrome_match;
@@ -5607,6 +5812,10 @@ int main(int argc, char **argv) {
     long long last_progress_logged = 0;
     double latency_sum_sec = 0.0;
     long long latency_samples = 0;
+    double cuda_kernel_ms_sum = 0.0;
+    double cuda_memcpy_ms_sum = 0.0;
+    double cuda_host_ms_sum = 0.0;
+    long long cuda_samples = 0;
     std::vector<long long> ets_used_counts(ets_labels.size(), 0);
     auto record_ets_labels = [&](const std::vector<std::string> &labels) {
         for (const auto &label : labels) {
@@ -5653,13 +5862,43 @@ int main(int argc, char **argv) {
         auto latency_start = std::chrono::steady_clock::now();
 
         std::vector<std::string> pp_log_lines;
-        auto res = joint_bp_decode(
-            x_checks, z_checks, var_to_x, var_to_z,
-            sx, sz, prior, max_iter, flip_hist_window, freeze_syn, damping,
-            iter_verbose, verbose_all, enable_pp, pp_ctx_ptr, &err,
-            need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
-            &pp_log_lines
-        );
+        JointBPResult res;
+        if (cuda_ctx) {
+            CudaBPResult cuda_res;
+            CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
+            std::string cuda_error;
+            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter, cuda_check_interval,
+                                     freeze_syn, damping, cuda_res, &cuda_error);
+            if (!ok) {
+                std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
+            } else {
+                res.est = std::move(cuda_res.est);
+                res.iterations = cuda_res.iterations;
+                res.syndrome_match = cuda_res.syndrome_match;
+                res.bp_syndrome_match = cuda_res.syndrome_match;
+                res.used_cuda = true;
+                res.cuda_kernel_ms = cuda_res.kernel_ms;
+                res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_host_ms = cuda_res.host_ms;
+            }
+            if (!ok) {
+                res = joint_bp_decode(
+                    x_checks, z_checks, var_to_x, var_to_z,
+                    sx, sz, prior, max_iter, flip_hist_window, freeze_syn, damping,
+                    iter_verbose, verbose_all, enable_pp, pp_ctx_ptr, &err,
+                    need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
+                    &pp_log_lines
+                );
+            }
+        } else {
+            res = joint_bp_decode(
+                x_checks, z_checks, var_to_x, var_to_z,
+                sx, sz, prior, max_iter, flip_hist_window, freeze_syn, damping,
+                iter_verbose, verbose_all, enable_pp, pp_ctx_ptr, &err,
+                need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
+                &pp_log_lines
+            );
+        }
 
         bool bp_ok = res.bp_syndrome_match;
         bool used6 = res.pp_used_ets6;
@@ -5899,6 +6138,12 @@ int main(int argc, char **argv) {
                                  .count();
         latency_sum_sec += latency_sec;
         latency_samples++;
+        if (res.used_cuda) {
+            cuda_kernel_ms_sum += res.cuda_kernel_ms;
+            cuda_memcpy_ms_sum += res.cuda_memcpy_ms;
+            cuda_host_ms_sum += res.cuda_host_ms;
+            cuda_samples++;
+        }
         if (pp_success_this && enable_log_files) {
             if (!ensure_dir(log_dir)) {
                 std::cerr << "Failed to create log directory: " << log_dir << "\n";
@@ -6044,9 +6289,14 @@ int main(int argc, char **argv) {
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - start).count();
             double avg_latency_sec = (latency_samples > 0) ? (latency_sum_sec / latency_samples) : 0.0;
+            bool has_cuda_timings = cuda_samples > 0;
+            double avg_cuda_kernel_ms = has_cuda_timings ? (cuda_kernel_ms_sum / cuda_samples) : 0.0;
+            double avg_cuda_memcpy_ms = has_cuda_timings ? (cuda_memcpy_ms_sum / cuda_samples) : 0.0;
+            double avg_cuda_host_ms = has_cuda_timings ? (cuda_host_ms_sum / cuda_samples) : 0.0;
             report_progress(done, failures, bp_failures, pp_success, ets_saves, flip_pp_success,
                             osd_pp_success, stab_success, ets_used, ets_labels, ets_used_counts,
-                            total_iters, elapsed, k, avg_latency_sec);
+                            total_iters, elapsed, k, avg_latency_sec, has_cuda_timings,
+                            avg_cuda_kernel_ms, avg_cuda_memcpy_ms, avg_cuda_host_ms);
         }
         if (progress_every > 0 && (done % progress_every == 0)) {
             auto now = std::chrono::steady_clock::now();
