@@ -452,6 +452,31 @@ __global__ void syndrome_kernel(
     syndrome[c] = parity;
 }
 
+__global__ void syndrome_compare_kernel(
+    int checks,
+    const int *check_offsets,
+    const int *check_edges,
+    const int *edge_var,
+    const int *est,
+    const int *syndrome,
+    int use_xbit,
+    int *syn_all
+) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= checks) return;
+    int start = check_offsets[c];
+    int end = check_offsets[c + 1];
+    int parity = 0;
+    for (int idx = start; idx < end; ++idx) {
+        int v = edge_var[check_edges[idx]];
+        int bit = use_xbit ? xbit(est[v]) : zbit(est[v]);
+        parity ^= bit;
+    }
+    if (parity != syndrome[c]) {
+        atomicAnd(syn_all, 0);
+    }
+}
+
 __global__ void mismatch_count_kernel(int n, const int *a, const int *b, int *out) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
@@ -780,31 +805,29 @@ bool cuda_bp_decode(
 
         bool do_check = ((iter + 1) % check_interval == 0) || (iter + 1 == max_iter);
         if (do_check) {
-            syndrome_kernel<<<check_x_blocks, threads>>>(
+            cudaMemset(ctx->d_syn_x, 1, sizeof(int));
+            cudaMemset(ctx->d_syn_z, 1, sizeof(int));
+            syndrome_compare_kernel<<<check_x_blocks, threads>>>(
                 ctx->mX,
                 ctx->d_x_check_offsets,
                 ctx->d_x_check_edges,
                 ctx->d_x_edge_var,
                 ctx->d_est,
+                ctx->d_sx,
                 1,
-                ctx->d_sx_hat
+                ctx->d_syn_x
             );
-            syndrome_kernel<<<check_z_blocks, threads>>>(
+            syndrome_compare_kernel<<<check_z_blocks, threads>>>(
                 ctx->mZ,
                 ctx->d_z_check_offsets,
                 ctx->d_z_check_edges,
                 ctx->d_z_edge_var,
                 ctx->d_est,
+                ctx->d_sz,
                 0,
-                ctx->d_sz_hat
+                ctx->d_syn_z
             );
-            if (!check_cuda(cudaGetLastError(), error_out, "syndrome_kernel")) return false;
-
-            cudaMemset(ctx->d_syn_x, 1, sizeof(int));
-            cudaMemset(ctx->d_syn_z, 1, sizeof(int));
-            compare_syndrome_kernel<<<check_x_blocks, threads>>>(ctx->mX, ctx->d_sx_hat, ctx->d_sx, ctx->d_syn_x);
-            compare_syndrome_kernel<<<check_z_blocks, threads>>>(ctx->mZ, ctx->d_sz_hat, ctx->d_sz, ctx->d_syn_z);
-            if (!check_cuda(cudaGetLastError(), error_out, "compare_syndrome_kernel")) return false;
+            if (!check_cuda(cudaGetLastError(), error_out, "syndrome_compare_kernel")) return false;
 
             int syn_x_flag = 0;
             int syn_z_flag = 0;
@@ -835,31 +858,29 @@ bool cuda_bp_decode(
     }
 
     if (last_checked_iter != iter) {
-        syndrome_kernel<<<check_x_blocks, threads>>>(
+        cudaMemset(ctx->d_syn_x, 1, sizeof(int));
+        cudaMemset(ctx->d_syn_z, 1, sizeof(int));
+        syndrome_compare_kernel<<<check_x_blocks, threads>>>(
             ctx->mX,
             ctx->d_x_check_offsets,
             ctx->d_x_check_edges,
             ctx->d_x_edge_var,
             ctx->d_est,
+            ctx->d_sx,
             1,
-            ctx->d_sx_hat
+            ctx->d_syn_x
         );
-        syndrome_kernel<<<check_z_blocks, threads>>>(
+        syndrome_compare_kernel<<<check_z_blocks, threads>>>(
             ctx->mZ,
             ctx->d_z_check_offsets,
             ctx->d_z_check_edges,
             ctx->d_z_edge_var,
             ctx->d_est,
+            ctx->d_sz,
             0,
-            ctx->d_sz_hat
+            ctx->d_syn_z
         );
-        if (!check_cuda(cudaGetLastError(), error_out, "syndrome_kernel_final")) return false;
-
-        cudaMemset(ctx->d_syn_x, 1, sizeof(int));
-        cudaMemset(ctx->d_syn_z, 1, sizeof(int));
-        compare_syndrome_kernel<<<check_x_blocks, threads>>>(ctx->mX, ctx->d_sx_hat, ctx->d_sx, ctx->d_syn_x);
-        compare_syndrome_kernel<<<check_z_blocks, threads>>>(ctx->mZ, ctx->d_sz_hat, ctx->d_sz, ctx->d_syn_z);
-        if (!check_cuda(cudaGetLastError(), error_out, "compare_syndrome_kernel_final")) return false;
+        if (!check_cuda(cudaGetLastError(), error_out, "syndrome_compare_kernel_final")) return false;
 
         int syn_x_flag = 0;
         int syn_z_flag = 0;
