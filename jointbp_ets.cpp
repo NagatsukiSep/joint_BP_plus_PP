@@ -2375,16 +2375,27 @@ static JointBPResult joint_bp_decode(
                     q0[i] = m[0] + m[2];
                     q1[i] = m[1] + m[3];
                 }
+                std::vector<double> pref_even(deg + 1, 0.0), pref_odd(deg + 1, 0.0);
+                std::vector<double> suf_even(deg + 1, 0.0), suf_odd(deg + 1, 0.0);
+                pref_even[0] = 1.0;
+                pref_odd[0] = 0.0;
                 for (int i = 0; i < deg; ++i) {
-                    double p_even = 1.0;
-                    double p_odd = 0.0;
-                    for (int j = 0; j < deg; ++j) {
-                        if (j == i) continue;
-                        double new_even = p_even * q0[j] + p_odd * q1[j];
-                        double new_odd = p_even * q1[j] + p_odd * q0[j];
-                        p_even = new_even;
-                        p_odd = new_odd;
-                    }
+                    double new_even = pref_even[i] * q0[i] + pref_odd[i] * q1[i];
+                    double new_odd = pref_even[i] * q1[i] + pref_odd[i] * q0[i];
+                    pref_even[i + 1] = new_even;
+                    pref_odd[i + 1] = new_odd;
+                }
+                suf_even[deg] = 1.0;
+                suf_odd[deg] = 0.0;
+                for (int i = deg - 1; i >= 0; --i) {
+                    double new_even = suf_even[i + 1] * q0[i] + suf_odd[i + 1] * q1[i];
+                    double new_odd = suf_even[i + 1] * q1[i] + suf_odd[i + 1] * q0[i];
+                    suf_even[i] = new_even;
+                    suf_odd[i] = new_odd;
+                }
+                for (int i = 0; i < deg; ++i) {
+                    double p_even = pref_even[i] * suf_even[i + 1] + pref_odd[i] * suf_odd[i + 1];
+                    double p_odd = pref_even[i] * suf_odd[i + 1] + pref_odd[i] * suf_even[i + 1];
                     double val0 = (sx[c] == 0) ? p_even : p_odd;
                     double val1 = (sx[c] == 0) ? p_odd : p_even;
                     Msg out{val0, val1, val0, val1};
@@ -2403,16 +2414,27 @@ static JointBPResult joint_bp_decode(
                     q0[i] = m[0] + m[1];
                     q1[i] = m[2] + m[3];
                 }
+                std::vector<double> pref_even(deg + 1, 0.0), pref_odd(deg + 1, 0.0);
+                std::vector<double> suf_even(deg + 1, 0.0), suf_odd(deg + 1, 0.0);
+                pref_even[0] = 1.0;
+                pref_odd[0] = 0.0;
                 for (int i = 0; i < deg; ++i) {
-                    double p_even = 1.0;
-                    double p_odd = 0.0;
-                    for (int j = 0; j < deg; ++j) {
-                        if (j == i) continue;
-                        double new_even = p_even * q0[j] + p_odd * q1[j];
-                        double new_odd = p_even * q1[j] + p_odd * q0[j];
-                        p_even = new_even;
-                        p_odd = new_odd;
-                    }
+                    double new_even = pref_even[i] * q0[i] + pref_odd[i] * q1[i];
+                    double new_odd = pref_even[i] * q1[i] + pref_odd[i] * q0[i];
+                    pref_even[i + 1] = new_even;
+                    pref_odd[i + 1] = new_odd;
+                }
+                suf_even[deg] = 1.0;
+                suf_odd[deg] = 0.0;
+                for (int i = deg - 1; i >= 0; --i) {
+                    double new_even = suf_even[i + 1] * q0[i] + suf_odd[i + 1] * q1[i];
+                    double new_odd = suf_even[i + 1] * q1[i] + suf_odd[i + 1] * q0[i];
+                    suf_even[i] = new_even;
+                    suf_odd[i] = new_odd;
+                }
+                for (int i = 0; i < deg; ++i) {
+                    double p_even = pref_even[i] * suf_even[i + 1] + pref_odd[i] * suf_odd[i + 1];
+                    double p_odd = pref_even[i] * suf_odd[i + 1] + pref_odd[i] * suf_even[i + 1];
                     double val0 = (sz[c] == 0) ? p_even : p_odd;
                     double val1 = (sz[c] == 0) ? p_odd : p_even;
                     Msg out{val0, val0, val1, val1};
@@ -2423,13 +2445,30 @@ static JointBPResult joint_bp_decode(
         }
 
         for (int v = 0; v < nvars; ++v) {
-            Msg total = prior;
-            for (const auto &e : var_to_x[v]) {
-                total = multiply_msg(total, x_c2v[e.check][e.pos]);
+            const auto &x_edges = var_to_x[v];
+            const auto &z_edges = var_to_z[v];
+            const Msg msg_identity{1.0, 1.0, 1.0, 1.0};
+            std::vector<Msg> pref_x(x_edges.size() + 1, msg_identity);
+            std::vector<Msg> suf_x(x_edges.size() + 1, msg_identity);
+            std::vector<Msg> pref_z(z_edges.size() + 1, msg_identity);
+            std::vector<Msg> suf_z(z_edges.size() + 1, msg_identity);
+            for (size_t i = 0; i < x_edges.size(); ++i) {
+                const auto &e = x_edges[i];
+                pref_x[i + 1] = multiply_msg(pref_x[i], x_c2v[e.check][e.pos]);
             }
-            for (const auto &e : var_to_z[v]) {
-                total = multiply_msg(total, z_c2v[e.check][e.pos]);
+            for (size_t i = x_edges.size(); i-- > 0;) {
+                const auto &e = x_edges[i];
+                suf_x[i] = multiply_msg(suf_x[i + 1], x_c2v[e.check][e.pos]);
             }
+            for (size_t i = 0; i < z_edges.size(); ++i) {
+                const auto &e = z_edges[i];
+                pref_z[i + 1] = multiply_msg(pref_z[i], z_c2v[e.check][e.pos]);
+            }
+            for (size_t i = z_edges.size(); i-- > 0;) {
+                const auto &e = z_edges[i];
+                suf_z[i] = multiply_msg(suf_z[i + 1], z_c2v[e.check][e.pos]);
+            }
+            Msg total = multiply_msg(prior, multiply_msg(pref_x.back(), pref_z.back()));
             normalize_msg(total);
 
             int best = 0;
@@ -2450,30 +2489,26 @@ static JointBPResult joint_bp_decode(
             }
 
             if (!freeze_x_active) {
-                for (const auto &e : var_to_x[v]) {
+                for (size_t i = 0; i < x_edges.size(); ++i) {
                     Msg out = prior;
-                    for (const auto &e2 : var_to_x[v]) {
-                        if (e2.check == e.check && e2.pos == e.pos) continue;
-                        out = multiply_msg(out, x_c2v[e2.check][e2.pos]);
-                    }
-                    for (const auto &e2 : var_to_z[v]) {
-                        out = multiply_msg(out, z_c2v[e2.check][e2.pos]);
-                    }
+                    Msg x_excl = multiply_msg(pref_x[i], suf_x[i + 1]);
+                    Msg z_all = pref_z.back();
+                    out = multiply_msg(out, x_excl);
+                    out = multiply_msg(out, z_all);
                     normalize_msg(out);
+                    const auto &e = x_edges[i];
                     x_v2c[e.check][e.pos] = scaled_mix(out, x_v2c[e.check][e.pos], damping);
                 }
             }
             if (!freeze_z_active) {
-                for (const auto &e : var_to_z[v]) {
+                for (size_t i = 0; i < z_edges.size(); ++i) {
                     Msg out = prior;
-                    for (const auto &e2 : var_to_x[v]) {
-                        out = multiply_msg(out, x_c2v[e2.check][e2.pos]);
-                    }
-                    for (const auto &e2 : var_to_z[v]) {
-                        if (e2.check == e.check && e2.pos == e.pos) continue;
-                        out = multiply_msg(out, z_c2v[e2.check][e2.pos]);
-                    }
+                    Msg x_all = pref_x.back();
+                    Msg z_excl = multiply_msg(pref_z[i], suf_z[i + 1]);
+                    out = multiply_msg(out, x_all);
+                    out = multiply_msg(out, z_excl);
                     normalize_msg(out);
+                    const auto &e = z_edges[i];
                     z_v2c[e.check][e.pos] = scaled_mix(out, z_v2c[e.check][e.pos], damping);
                 }
             }
