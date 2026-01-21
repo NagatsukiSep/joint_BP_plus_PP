@@ -684,8 +684,9 @@ bool cuda_bp_decode(
     int check_z_blocks = (ctx->mZ + threads - 1) / threads;
     int check_x_threads = ctx->max_x_deg > 0 ? ctx->max_x_deg : 1;
     int check_z_threads = ctx->max_z_deg > 0 ? ctx->max_z_deg : 1;
-    bool use_prefix_x = true;
-    bool use_prefix_z = true;
+    const int prefix_threshold = 32;
+    bool use_prefix_x = ctx->max_x_deg >= prefix_threshold;
+    bool use_prefix_z = ctx->max_z_deg >= prefix_threshold;
     if (check_x_threads > 256) {
         check_x_threads = 256;
         use_prefix_x = false;
