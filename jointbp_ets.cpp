@@ -4616,6 +4616,20 @@ static std::string format_progress_line_compact(
     return oss.str();
 }
 
+static void print_iteration_histogram(const std::vector<long long> &hist, long long total) {
+    if (total <= 0 || hist.size() <= 1) return;
+    print_stdout_section("Iteration Histogram");
+    for (size_t i = 1; i < hist.size(); ++i) {
+        long long count = hist[i];
+        if (count == 0) continue;
+        double frac = static_cast<double>(count) / static_cast<double>(total);
+        std::cout << "iter=" << i
+                  << " count=" << count
+                  << " frac=" << std::setprecision(6) << std::fixed << frac
+                  << "\n";
+    }
+}
+
 static void report_progress(
     long long trials_done,
     long long failures,
@@ -4756,6 +4770,7 @@ static void print_usage(const char *prog) {
     std::cerr << "    If 0, do not use history union; use only the last flip.\n";
     std::cerr << "  --freeze-syn    Freeze BP on a side once its syndrome is satisfied.\n";
     std::cerr << "  --no-pp         Disable PP (ETS/flip).\n";
+    std::cerr << "  --iter-hist     Print iteration histogram on completion.\n";
     std::cerr << "  --report-fail   Print summary on failure to stdout.\n";
     std::cerr << "  --report-ets    Print detailed ETS application status.\n";
     std::cerr << "  --est FILE      Write estimated error vector (trials=1 only)\n";
@@ -4828,6 +4843,7 @@ int main(int argc, char **argv) {
     long long progress_every = 100;
     bool report_fail = false;
     bool report_ets = false;
+    bool iter_hist = false;
     long long trial_index = -1;
     bool enable_pp = true;
     bool use_cuda = false;
@@ -4923,6 +4939,8 @@ int main(int argc, char **argv) {
             report_fail = true;
         } else if (arg == "--report-ets") {
             report_ets = true;
+        } else if (arg == "--iter-hist") {
+            iter_hist = true;
         } else if (arg == "--save-fail-prefix") {
             need(1);
             save_fail_prefix = argv[++i];
@@ -5786,6 +5804,13 @@ int main(int argc, char **argv) {
             }
             std::cout << "Saved estimate: " << est_path << "\n";
         }
+        if (iter_hist) {
+            std::vector<long long> hist(static_cast<size_t>(max_iter) + 1, 0);
+            if (res.iterations >= 1 && res.iterations <= max_iter) {
+                hist[static_cast<size_t>(res.iterations)] = 1;
+            }
+            print_iteration_histogram(hist, 1);
+        }
         return success ? 0 : 2;
     }
 
@@ -5803,6 +5828,10 @@ int main(int argc, char **argv) {
     PPEarlyContext pp_ctx{enable_pp, ets_verbose, ets_refs, cycles_ptr};
     const PPEarlyContext *pp_ctx_ptr = enable_pp ? &pp_ctx : nullptr;
     std::uniform_real_distribution<double> dist(0.0, 1.0);
+    std::vector<long long> iter_hist_counts;
+    if (iter_hist) {
+        iter_hist_counts.assign(static_cast<size_t>(max_iter) + 1, 0);
+    }
     long long failures = 0;
     long long bp_failures = 0;
     long long pp_success = 0;
@@ -6209,6 +6238,9 @@ int main(int argc, char **argv) {
         }
 
         total_iters += res.iterations;
+        if (iter_hist && res.iterations >= 1 && res.iterations <= max_iter) {
+            iter_hist_counts[static_cast<size_t>(res.iterations)]++;
+        }
         if (!success) failures++;
         if (!success && enable_log_files) {
             std::ostringstream fail_path;
@@ -6355,5 +6387,8 @@ int main(int argc, char **argv) {
               << " exact_rate=" << std::setprecision(6) << std::fixed << exact_rate
               << " elapsed_s=" << std::setprecision(2) << std::fixed << elapsed << "s"
               << "\n";
+    if (iter_hist) {
+        print_iteration_histogram(iter_hist_counts, done);
+    }
     return 0;
 }
