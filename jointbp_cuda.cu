@@ -31,7 +31,7 @@ __host__ __device__ DeviceMsg make_msg(MsgReal a, MsgReal b, MsgReal c, MsgReal 
 
 namespace {
 
-__device__ void normalize_msg(DeviceMsg &m) {
+__device__ __forceinline__ void normalize_msg(DeviceMsg &m) {
     MsgReal sum = m.v0 + m.v1 + m.v2 + m.v3;
     if (sum <= 0.0) {
         m.v0 = 0.25;
@@ -47,11 +47,11 @@ __device__ void normalize_msg(DeviceMsg &m) {
     m.v3 *= inv;
 }
 
-__device__ DeviceMsg multiply_msg(const DeviceMsg &a, const DeviceMsg &b) {
+__device__ __forceinline__ DeviceMsg multiply_msg(const DeviceMsg &a, const DeviceMsg &b) {
     return make_msg(a.v0 * b.v0, a.v1 * b.v1, a.v2 * b.v2, a.v3 * b.v3);
 }
 
-__device__ MsgReal abs_real(MsgReal v) {
+__device__ __forceinline__ MsgReal abs_real(MsgReal v) {
 #ifdef USE_CUDA_FP32
     return fabsf(v);
 #else
@@ -59,7 +59,7 @@ __device__ MsgReal abs_real(MsgReal v) {
 #endif
 }
 
-__device__ DeviceMsg divide_msg(const DeviceMsg &num, const DeviceMsg &den) {
+__device__ __forceinline__ DeviceMsg divide_msg(const DeviceMsg &num, const DeviceMsg &den) {
     const MsgReal eps = static_cast<MsgReal>(1e-20);
     return make_msg(num.v0 / (abs_real(den.v0) + eps),
                     num.v1 / (abs_real(den.v1) + eps),
@@ -67,19 +67,19 @@ __device__ DeviceMsg divide_msg(const DeviceMsg &num, const DeviceMsg &den) {
                     num.v3 / (abs_real(den.v3) + eps));
 }
 
-__device__ int xbit(int state) {
+__device__ __forceinline__ int xbit(int state) {
     return (state == 1 || state == 3) ? 1 : 0;
 }
 
-__device__ int zbit(int state) {
+__device__ __forceinline__ int zbit(int state) {
     return (state == 2 || state == 3) ? 1 : 0;
 }
 
-__device__ DeviceMsg det_msg_xbit(int bit) {
+__device__ __forceinline__ DeviceMsg det_msg_xbit(int bit) {
     return bit ? make_msg(0.0, 0.5, 0.0, 0.5) : make_msg(0.5, 0.0, 0.5, 0.0);
 }
 
-__device__ DeviceMsg det_msg_zbit(int bit) {
+__device__ __forceinline__ DeviceMsg det_msg_zbit(int bit) {
     return bit ? make_msg(0.0, 0.0, 0.5, 0.5) : make_msg(0.5, 0.5, 0.0, 0.0);
 }
 
@@ -391,34 +391,40 @@ __global__ void variable_update_kernel(
         abs_llr_z[v] = fabs(llr_z);
     }
     if (!freeze_x) {
+        const bool use_damping = damping > 0.0;
+        const MsgReal keep = use_damping ? static_cast<MsgReal>(1.0 - damping) : static_cast<MsgReal>(1.0);
+        const MsgReal damp = use_damping ? static_cast<MsgReal>(damping) : static_cast<MsgReal>(0.0);
         for (int idx = x_start; idx < x_end; ++idx) {
             int e = x_var_edges[idx];
             DeviceMsg out = divide_msg(total, x_c2v[e]);
             normalize_msg(out);
-            DeviceMsg old = x_v2c[e];
-            MsgReal keep = static_cast<MsgReal>(1.0 - damping);
-            MsgReal damp = static_cast<MsgReal>(damping);
-            out.v0 = keep * out.v0 + damp * old.v0;
-            out.v1 = keep * out.v1 + damp * old.v1;
-            out.v2 = keep * out.v2 + damp * old.v2;
-            out.v3 = keep * out.v3 + damp * old.v3;
-            normalize_msg(out);
+            if (use_damping) {
+                DeviceMsg old = x_v2c[e];
+                out.v0 = keep * out.v0 + damp * old.v0;
+                out.v1 = keep * out.v1 + damp * old.v1;
+                out.v2 = keep * out.v2 + damp * old.v2;
+                out.v3 = keep * out.v3 + damp * old.v3;
+                normalize_msg(out);
+            }
             x_v2c[e] = out;
         }
     }
     if (!freeze_z) {
+        const bool use_damping = damping > 0.0;
+        const MsgReal keep = use_damping ? static_cast<MsgReal>(1.0 - damping) : static_cast<MsgReal>(1.0);
+        const MsgReal damp = use_damping ? static_cast<MsgReal>(damping) : static_cast<MsgReal>(0.0);
         for (int idx = z_start; idx < z_end; ++idx) {
             int e = z_var_edges[idx];
             DeviceMsg out = divide_msg(total, z_c2v[e]);
             normalize_msg(out);
-            DeviceMsg old = z_v2c[e];
-            MsgReal keep = static_cast<MsgReal>(1.0 - damping);
-            MsgReal damp = static_cast<MsgReal>(damping);
-            out.v0 = keep * out.v0 + damp * old.v0;
-            out.v1 = keep * out.v1 + damp * old.v1;
-            out.v2 = keep * out.v2 + damp * old.v2;
-            out.v3 = keep * out.v3 + damp * old.v3;
-            normalize_msg(out);
+            if (use_damping) {
+                DeviceMsg old = z_v2c[e];
+                out.v0 = keep * out.v0 + damp * old.v0;
+                out.v1 = keep * out.v1 + damp * old.v1;
+                out.v2 = keep * out.v2 + damp * old.v2;
+                out.v3 = keep * out.v3 + damp * old.v3;
+                normalize_msg(out);
+            }
             z_v2c[e] = out;
         }
     }
