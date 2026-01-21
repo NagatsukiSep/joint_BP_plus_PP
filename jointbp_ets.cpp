@@ -4763,6 +4763,7 @@ static void print_usage(const char *prog) {
     print_help_section("CUDA Acceleration");
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
     std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
+    std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
 
     print_help_section("ETS Files");
@@ -4831,6 +4832,7 @@ int main(int argc, char **argv) {
     bool enable_pp = true;
     bool use_cuda = false;
     int cuda_device = 0;
+    int cuda_check_warmup = 0;
     int cuda_check_interval = 1;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
@@ -4934,6 +4936,12 @@ int main(int argc, char **argv) {
         } else if (arg == "--cuda-device") {
             need(1);
             cuda_device = std::stoi(argv[++i]);
+        } else if (arg == "--cuda-check-warmup") {
+            need(1);
+            cuda_check_warmup = std::stoi(argv[++i]);
+            if (cuda_check_warmup < 0) {
+                cuda_check_warmup = 0;
+            }
         } else if (arg == "--cuda-check-interval") {
             need(1);
             cuda_check_interval = std::stoi(argv[++i]);
@@ -5446,7 +5454,8 @@ int main(int argc, char **argv) {
             CudaBPResult cuda_res;
             CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
             std::string cuda_error;
-            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter, cuda_check_interval,
+            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
+                                     cuda_check_warmup, cuda_check_interval,
                                      freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
@@ -5867,7 +5876,8 @@ int main(int argc, char **argv) {
             CudaBPResult cuda_res;
             CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
             std::string cuda_error;
-            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter, cuda_check_interval,
+            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
+                                     cuda_check_warmup, cuda_check_interval,
                                      freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";

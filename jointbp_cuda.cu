@@ -662,6 +662,7 @@ bool cuda_bp_decode(
     const std::vector<int> &sz,
     const CudaMsg &prior,
     int max_iter,
+    int check_warmup,
     int check_interval,
     bool freeze_syn,
     double damping,
@@ -693,6 +694,9 @@ bool cuda_bp_decode(
     if (!time_memcpy(cudaMemcpy(ctx->d_sz, sz.data(), sizeof(int) * sz.size(), cudaMemcpyHostToDevice),
                      error_out, "copy sz")) {
         return false;
+    }
+    if (check_warmup < 0) {
+        check_warmup = 0;
     }
     if (check_interval <= 0) {
         check_interval = 1;
@@ -803,7 +807,11 @@ bool cuda_bp_decode(
         );
         if (!check_cuda(cudaGetLastError(), error_out, "bp_kernels")) return false;
 
-        bool do_check = ((iter + 1) % check_interval == 0) || (iter + 1 == max_iter);
+        bool do_check = (iter + 1 == max_iter);
+        if (!do_check && (iter + 1 > check_warmup)) {
+            int after_warmup = iter + 1 - check_warmup;
+            do_check = (after_warmup % check_interval == 0);
+        }
         if (do_check) {
             cudaMemset(ctx->d_syn_x, 1, sizeof(int));
             cudaMemset(ctx->d_syn_z, 1, sizeof(int));
