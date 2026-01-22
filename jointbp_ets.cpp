@@ -6423,7 +6423,10 @@ int main(int argc, char **argv) {
     if (cuda_costs && cuda_check_count_sum > 0) {
         double avg_check_kernel_ms = cuda_check_kernel_ms_sum / static_cast<double>(cuda_check_count_sum);
         double avg_check_memcpy_ms = cuda_check_memcpy_ms_sum / static_cast<double>(cuda_check_count_sum);
+        double avg_iter_kernel_ms = cuda_kernel_ms_sum / static_cast<double>(total_iters);
         std::cout << "cuda_check_count=" << cuda_check_count_sum
+                  << " cuda_kernel_ms_per_iter=" << std::setprecision(4) << std::fixed
+                  << avg_iter_kernel_ms
                   << " cuda_check_kernel_ms_per_check=" << std::setprecision(4) << std::fixed
                   << avg_check_kernel_ms
                   << " cuda_check_memcpy_ms_per_check=" << std::setprecision(4) << std::fixed
