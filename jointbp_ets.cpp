@@ -4780,6 +4780,7 @@ static void print_usage(const char *prog) {
     std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
     std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
+    std::cerr << "  --cuda-costs    Report CUDA check/iteration cost breakdown.\n";
 
     print_help_section("ETS Files");
     std::cerr << "  --ets6-x FILE --ets6-z FILE\n";
@@ -4850,6 +4851,7 @@ int main(int argc, char **argv) {
     int cuda_device = 0;
     int cuda_check_warmup = 0;
     int cuda_check_interval = 1;
+    bool cuda_costs = false;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
 
@@ -4966,6 +4968,8 @@ int main(int argc, char **argv) {
             if (cuda_check_interval <= 0) {
                 cuda_check_interval = 1;
             }
+        } else if (arg == "--cuda-costs") {
+            cuda_costs = true;
         } else if (arg == "--trial-index") {
             need(1);
             trial_index = std::stoll(argv[++i]);
@@ -5474,7 +5478,7 @@ int main(int argc, char **argv) {
             std::string cuda_error;
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
-                                     freeze_syn, damping, cuda_res, &cuda_error);
+                                     cuda_costs, freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
             } else {
@@ -5771,6 +5775,18 @@ int main(int argc, char **argv) {
         std::cout << "pp_success_ets=" << tf(pp_success_ets) << "\n";
         std::cout << "pp_success_flip=" << tf(pp_success_flip) << "\n";
         std::cout << "avg_latency=" << format_latency(latency_sec) << "\n";
+        if (cuda_costs && res.used_cuda && res.check_count > 0) {
+            double avg_iter_kernel_ms = res.kernel_ms / static_cast<double>(res.iterations);
+            double avg_check_kernel_ms = res.check_kernel_ms / static_cast<double>(res.check_count);
+            double avg_check_memcpy_ms = res.check_memcpy_ms / static_cast<double>(res.check_count);
+            std::cout << "cuda_check_count=" << res.check_count << "\n";
+            std::cout << "cuda_kernel_ms_per_iter=" << std::setprecision(4) << std::fixed
+                      << avg_iter_kernel_ms << "\n";
+            std::cout << "cuda_check_kernel_ms_per_check=" << std::setprecision(4) << std::fixed
+                      << avg_check_kernel_ms << "\n";
+            std::cout << "cuda_check_memcpy_ms_per_check=" << std::setprecision(4) << std::fixed
+                      << avg_check_memcpy_ms << "\n";
+        }
         write_progress_tsv(1, success ? 0 : 1, pp_success ? 1 : 0, pp_success_ets ? 1 : 0,
                            pp_success_flip ? 1 : 0, stab_success, res.iterations, elapsed_sec);
         bool syn_x = (sx_hat == sx);
@@ -5854,6 +5870,9 @@ int main(int argc, char **argv) {
     double cuda_memcpy_ms_sum = 0.0;
     double cuda_host_ms_sum = 0.0;
     long long cuda_samples = 0;
+    double cuda_check_kernel_ms_sum = 0.0;
+    double cuda_check_memcpy_ms_sum = 0.0;
+    long long cuda_check_count_sum = 0;
     std::vector<long long> ets_used_counts(ets_labels.size(), 0);
     auto record_ets_labels = [&](const std::vector<std::string> &labels) {
         for (const auto &label : labels) {
@@ -5907,7 +5926,7 @@ int main(int argc, char **argv) {
             std::string cuda_error;
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
-                                     freeze_syn, damping, cuda_res, &cuda_error);
+                                     cuda_costs, freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
             } else {
@@ -6182,6 +6201,11 @@ int main(int argc, char **argv) {
             cuda_memcpy_ms_sum += res.cuda_memcpy_ms;
             cuda_host_ms_sum += res.cuda_host_ms;
             cuda_samples++;
+            if (cuda_costs && res.check_count > 0) {
+                cuda_check_kernel_ms_sum += res.check_kernel_ms;
+                cuda_check_memcpy_ms_sum += res.check_memcpy_ms;
+                cuda_check_count_sum += res.check_count;
+            }
         }
         if (pp_success_this && enable_log_files) {
             if (!ensure_dir(log_dir)) {
@@ -6387,6 +6411,16 @@ int main(int argc, char **argv) {
               << " exact_rate=" << std::setprecision(6) << std::fixed << exact_rate
               << " elapsed_s=" << std::setprecision(2) << std::fixed << elapsed << "s"
               << "\n";
+    if (cuda_costs && cuda_check_count_sum > 0) {
+        double avg_check_kernel_ms = cuda_check_kernel_ms_sum / static_cast<double>(cuda_check_count_sum);
+        double avg_check_memcpy_ms = cuda_check_memcpy_ms_sum / static_cast<double>(cuda_check_count_sum);
+        std::cout << "cuda_check_count=" << cuda_check_count_sum
+                  << " cuda_check_kernel_ms_per_check=" << std::setprecision(4) << std::fixed
+                  << avg_check_kernel_ms
+                  << " cuda_check_memcpy_ms_per_check=" << std::setprecision(4) << std::fixed
+                  << avg_check_memcpy_ms
+                  << "\n";
+    }
     if (iter_hist) {
         print_iteration_histogram(iter_hist_counts, done);
     }
