@@ -1933,6 +1933,9 @@ struct JointBPResult {
     bool used_cuda = false;
     double cuda_kernel_ms = 0.0;
     double cuda_memcpy_ms = 0.0;
+    int cuda_check_count = 0;
+    double cuda_check_kernel_ms = 0.0;
+    double cuda_check_memcpy_ms = 0.0;
     double cuda_host_ms = 0.0;
 };
 
@@ -5489,6 +5492,9 @@ int main(int argc, char **argv) {
                 res.used_cuda = true;
                 res.cuda_kernel_ms = cuda_res.kernel_ms;
                 res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_check_count = cuda_res.check_count;
+                res.cuda_check_kernel_ms = cuda_res.check_kernel_ms;
+                res.cuda_check_memcpy_ms = cuda_res.check_memcpy_ms;
                 res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
@@ -5775,11 +5781,11 @@ int main(int argc, char **argv) {
         std::cout << "pp_success_ets=" << tf(pp_success_ets) << "\n";
         std::cout << "pp_success_flip=" << tf(pp_success_flip) << "\n";
         std::cout << "avg_latency=" << format_latency(latency_sec) << "\n";
-        if (cuda_costs && res.used_cuda && res.check_count > 0) {
-            double avg_iter_kernel_ms = res.kernel_ms / static_cast<double>(res.iterations);
-            double avg_check_kernel_ms = res.check_kernel_ms / static_cast<double>(res.check_count);
-            double avg_check_memcpy_ms = res.check_memcpy_ms / static_cast<double>(res.check_count);
-            std::cout << "cuda_check_count=" << res.check_count << "\n";
+        if (cuda_costs && res.used_cuda && res.cuda_check_count > 0) {
+            double avg_iter_kernel_ms = res.cuda_kernel_ms / static_cast<double>(res.iterations);
+            double avg_check_kernel_ms = res.cuda_check_kernel_ms / static_cast<double>(res.cuda_check_count);
+            double avg_check_memcpy_ms = res.cuda_check_memcpy_ms / static_cast<double>(res.cuda_check_count);
+            std::cout << "cuda_check_count=" << res.cuda_check_count << "\n";
             std::cout << "cuda_kernel_ms_per_iter=" << std::setprecision(4) << std::fixed
                       << avg_iter_kernel_ms << "\n";
             std::cout << "cuda_check_kernel_ms_per_check=" << std::setprecision(4) << std::fixed
@@ -5937,6 +5943,9 @@ int main(int argc, char **argv) {
                 res.used_cuda = true;
                 res.cuda_kernel_ms = cuda_res.kernel_ms;
                 res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_check_count = cuda_res.check_count;
+                res.cuda_check_kernel_ms = cuda_res.check_kernel_ms;
+                res.cuda_check_memcpy_ms = cuda_res.check_memcpy_ms;
                 res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
@@ -6201,10 +6210,10 @@ int main(int argc, char **argv) {
             cuda_memcpy_ms_sum += res.cuda_memcpy_ms;
             cuda_host_ms_sum += res.cuda_host_ms;
             cuda_samples++;
-            if (cuda_costs && res.check_count > 0) {
-                cuda_check_kernel_ms_sum += res.check_kernel_ms;
-                cuda_check_memcpy_ms_sum += res.check_memcpy_ms;
-                cuda_check_count_sum += res.check_count;
+            if (cuda_costs && res.cuda_check_count > 0) {
+                cuda_check_kernel_ms_sum += res.cuda_check_kernel_ms;
+                cuda_check_memcpy_ms_sum += res.cuda_check_memcpy_ms;
+                cuda_check_count_sum += res.cuda_check_count;
             }
         }
         if (pp_success_this && enable_log_files) {
