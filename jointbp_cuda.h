@@ -32,9 +32,13 @@ struct CudaBPGraph {
 struct CudaBPResult {
     std::vector<int> est;
     int iterations = 0;
+    int check_count = 0;
     bool syndrome_match = false;
     double kernel_ms = 0.0;
     double memcpy_ms = 0.0;
+    double check_kernel_ms = 0.0;
+    double check_memcpy_ms = 0.0;
+    double init_kernel_ms = 0.0;
     double host_ms = 0.0;
 };
 
@@ -49,7 +53,9 @@ bool cuda_bp_decode(
     const std::vector<int> &sz,
     const CudaMsg &prior,
     int max_iter,
+    int check_warmup,
     int check_interval,
+    bool measure_costs,
     bool freeze_syn,
     double damping,
     CudaBPResult &out,
@@ -70,6 +76,8 @@ inline bool cuda_bp_decode(
     const CudaMsg &,
     int,
     int,
+    int,
+    bool,
     bool,
     double,
     CudaBPResult &,

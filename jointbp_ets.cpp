@@ -1933,6 +1933,10 @@ struct JointBPResult {
     bool used_cuda = false;
     double cuda_kernel_ms = 0.0;
     double cuda_memcpy_ms = 0.0;
+    int cuda_check_count = 0;
+    double cuda_check_kernel_ms = 0.0;
+    double cuda_check_memcpy_ms = 0.0;
+    double cuda_init_kernel_ms = 0.0;
     double cuda_host_ms = 0.0;
 };
 
@@ -4616,6 +4620,26 @@ static std::string format_progress_line_compact(
     return oss.str();
 }
 
+static bool write_costs_out(
+    const std::string &path,
+    double iter_cost_ms,
+    double check_cost_ms,
+    const std::vector<long long> &hist,
+    long long total
+) {
+    if (path.empty() || total <= 0 || hist.size() <= 1) return true;
+    std::ofstream out(path);
+    if (!out) return false;
+    out << std::setprecision(8) << std::fixed << iter_cost_ms << " " << check_cost_ms << "\n";
+    for (size_t i = 1; i < hist.size(); ++i) {
+        long long count = hist[i];
+        if (count == 0) continue;
+        double frac = static_cast<double>(count) / static_cast<double>(total);
+        out << i << " " << std::setprecision(10) << std::fixed << frac << "\n";
+    }
+    return true;
+}
+
 static void report_progress(
     long long trials_done,
     long long failures,
@@ -4759,10 +4783,12 @@ static void print_usage(const char *prog) {
     std::cerr << "  --report-fail   Print summary on failure to stdout.\n";
     std::cerr << "  --report-ets    Print detailed ETS application status.\n";
     std::cerr << "  --est FILE      Write estimated error vector (trials=1 only)\n";
+    std::cerr << "  --costs-out FILE  Write cost/histogram summary to FILE.\n";
 
     print_help_section("CUDA Acceleration");
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
     std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
+    std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
 
     print_help_section("ETS Files");
@@ -4827,13 +4853,17 @@ int main(int argc, char **argv) {
     long long progress_every = 100;
     bool report_fail = false;
     bool report_ets = false;
+    bool iter_hist = false;
     long long trial_index = -1;
     bool enable_pp = true;
     bool use_cuda = false;
     int cuda_device = 0;
+    int cuda_check_warmup = 0;
     int cuda_check_interval = 1;
+    bool cuda_costs = false;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
+    std::string costs_out_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -4921,6 +4951,11 @@ int main(int argc, char **argv) {
             report_fail = true;
         } else if (arg == "--report-ets") {
             report_ets = true;
+        } else if (arg == "--costs-out") {
+            need(1);
+            costs_out_path = argv[++i];
+            iter_hist = true;
+            cuda_costs = true;
         } else if (arg == "--save-fail-prefix") {
             need(1);
             save_fail_prefix = argv[++i];
@@ -4934,6 +4969,12 @@ int main(int argc, char **argv) {
         } else if (arg == "--cuda-device") {
             need(1);
             cuda_device = std::stoi(argv[++i]);
+        } else if (arg == "--cuda-check-warmup") {
+            need(1);
+            cuda_check_warmup = std::stoi(argv[++i]);
+            if (cuda_check_warmup < 0) {
+                cuda_check_warmup = 0;
+            }
         } else if (arg == "--cuda-check-interval") {
             need(1);
             cuda_check_interval = std::stoi(argv[++i]);
@@ -5446,8 +5487,9 @@ int main(int argc, char **argv) {
             CudaBPResult cuda_res;
             CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
             std::string cuda_error;
-            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter, cuda_check_interval,
-                                     freeze_syn, damping, cuda_res, &cuda_error);
+            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
+                                     cuda_check_warmup, cuda_check_interval,
+                                     cuda_costs, freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
             } else {
@@ -5458,6 +5500,10 @@ int main(int argc, char **argv) {
                 res.used_cuda = true;
                 res.cuda_kernel_ms = cuda_res.kernel_ms;
                 res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_check_count = cuda_res.check_count;
+                res.cuda_check_kernel_ms = cuda_res.check_kernel_ms;
+                res.cuda_check_memcpy_ms = cuda_res.check_memcpy_ms;
+                res.cuda_init_kernel_ms = cuda_res.init_kernel_ms;
                 res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
@@ -5777,6 +5823,29 @@ int main(int argc, char **argv) {
             }
             std::cout << "Saved estimate: " << est_path << "\n";
         }
+        if (iter_hist) {
+            std::vector<long long> hist(static_cast<size_t>(max_iter) + 1, 0);
+            if (res.iterations >= 1 && res.iterations <= max_iter) {
+                hist[static_cast<size_t>(res.iterations)] = 1;
+            }
+            double iter_cost_ms = 0.0;
+            double check_cost_ms = 0.0;
+            if (cuda_costs && res.used_cuda && res.iterations > 0) {
+                double check_kernel_ms = res.cuda_check_kernel_ms;
+                if (res.cuda_check_count == 0) {
+                    check_kernel_ms = 0.0;
+                }
+                iter_cost_ms = (res.cuda_kernel_ms - check_kernel_ms - res.cuda_init_kernel_ms) /
+                               static_cast<double>(res.iterations);
+                if (res.cuda_check_count > 0) {
+                    check_cost_ms = (res.cuda_check_kernel_ms + res.cuda_check_memcpy_ms) /
+                                    static_cast<double>(res.cuda_check_count);
+                }
+            }
+            if (!write_costs_out(costs_out_path, iter_cost_ms, check_cost_ms, hist, 1)) {
+                std::cerr << "Failed to write costs output: " << costs_out_path << "\n";
+            }
+        }
         return success ? 0 : 2;
     }
 
@@ -5794,6 +5863,10 @@ int main(int argc, char **argv) {
     PPEarlyContext pp_ctx{enable_pp, ets_verbose, ets_refs, cycles_ptr};
     const PPEarlyContext *pp_ctx_ptr = enable_pp ? &pp_ctx : nullptr;
     std::uniform_real_distribution<double> dist(0.0, 1.0);
+    std::vector<long long> iter_hist_counts;
+    if (iter_hist) {
+        iter_hist_counts.assign(static_cast<size_t>(max_iter) + 1, 0);
+    }
     long long failures = 0;
     long long bp_failures = 0;
     long long pp_success = 0;
@@ -5816,6 +5889,10 @@ int main(int argc, char **argv) {
     double cuda_memcpy_ms_sum = 0.0;
     double cuda_host_ms_sum = 0.0;
     long long cuda_samples = 0;
+    double cuda_check_kernel_ms_sum = 0.0;
+    double cuda_check_memcpy_ms_sum = 0.0;
+    double cuda_init_kernel_ms_sum = 0.0;
+    long long cuda_check_count_sum = 0;
     std::vector<long long> ets_used_counts(ets_labels.size(), 0);
     auto record_ets_labels = [&](const std::vector<std::string> &labels) {
         for (const auto &label : labels) {
@@ -5867,8 +5944,9 @@ int main(int argc, char **argv) {
             CudaBPResult cuda_res;
             CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
             std::string cuda_error;
-            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter, cuda_check_interval,
-                                     freeze_syn, damping, cuda_res, &cuda_error);
+            bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
+                                     cuda_check_warmup, cuda_check_interval,
+                                     cuda_costs, freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
             } else {
@@ -5879,6 +5957,10 @@ int main(int argc, char **argv) {
                 res.used_cuda = true;
                 res.cuda_kernel_ms = cuda_res.kernel_ms;
                 res.cuda_memcpy_ms = cuda_res.memcpy_ms;
+                res.cuda_check_count = cuda_res.check_count;
+                res.cuda_check_kernel_ms = cuda_res.check_kernel_ms;
+                res.cuda_check_memcpy_ms = cuda_res.check_memcpy_ms;
+                res.cuda_init_kernel_ms = cuda_res.init_kernel_ms;
                 res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
@@ -6142,7 +6224,13 @@ int main(int argc, char **argv) {
             cuda_kernel_ms_sum += res.cuda_kernel_ms;
             cuda_memcpy_ms_sum += res.cuda_memcpy_ms;
             cuda_host_ms_sum += res.cuda_host_ms;
+            cuda_init_kernel_ms_sum += res.cuda_init_kernel_ms;
             cuda_samples++;
+            if (cuda_costs && res.cuda_check_count > 0) {
+                cuda_check_kernel_ms_sum += res.cuda_check_kernel_ms;
+                cuda_check_memcpy_ms_sum += res.cuda_check_memcpy_ms;
+                cuda_check_count_sum += res.cuda_check_count;
+            }
         }
         if (pp_success_this && enable_log_files) {
             if (!ensure_dir(log_dir)) {
@@ -6199,6 +6287,9 @@ int main(int argc, char **argv) {
         }
 
         total_iters += res.iterations;
+        if (iter_hist && res.iterations >= 1 && res.iterations <= max_iter) {
+            iter_hist_counts[static_cast<size_t>(res.iterations)]++;
+        }
         if (!success) failures++;
         if (!success && enable_log_files) {
             std::ostringstream fail_path;
@@ -6345,5 +6436,24 @@ int main(int argc, char **argv) {
               << " exact_rate=" << std::setprecision(6) << std::fixed << exact_rate
               << " elapsed_s=" << std::setprecision(2) << std::fixed << elapsed << "s"
               << "\n";
+    if (iter_hist) {
+        double iter_cost_ms = 0.0;
+        double check_cost_ms = 0.0;
+        if (cuda_costs && total_iters > 0) {
+            double check_kernel_ms = cuda_check_kernel_ms_sum;
+            if (cuda_check_count_sum == 0) {
+                check_kernel_ms = 0.0;
+            }
+            iter_cost_ms = (cuda_kernel_ms_sum - check_kernel_ms - cuda_init_kernel_ms_sum) /
+                           static_cast<double>(total_iters);
+            if (cuda_check_count_sum > 0) {
+                check_cost_ms = (cuda_check_kernel_ms_sum + cuda_check_memcpy_ms_sum) /
+                                static_cast<double>(cuda_check_count_sum);
+            }
+        }
+        if (!write_costs_out(costs_out_path, iter_cost_ms, check_cost_ms, iter_hist_counts, done)) {
+            std::cerr << "Failed to write costs output: " << costs_out_path << "\n";
+        }
+    }
     return 0;
 }

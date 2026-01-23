@@ -662,7 +662,9 @@ bool cuda_bp_decode(
     const std::vector<int> &sz,
     const CudaMsg &prior,
     int max_iter,
+    int check_warmup,
     int check_interval,
+    bool measure_costs,
     bool freeze_syn,
     double damping,
     CudaBPResult &out,
@@ -670,11 +672,16 @@ bool cuda_bp_decode(
 ) {
     auto host_start = std::chrono::steady_clock::now();
     double memcpy_ms = 0.0;
-    auto time_memcpy = [&](cudaError_t err, std::string *err_out, const char *ctx_label) -> bool {
+    double check_memcpy_ms = 0.0;
+    auto time_memcpy = [&](cudaError_t err, std::string *err_out, const char *ctx_label, double *bucket) -> bool {
         auto t0 = std::chrono::steady_clock::now();
         bool ok = check_cuda(err, err_out, ctx_label);
         auto t1 = std::chrono::steady_clock::now();
-        memcpy_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        memcpy_ms += dt;
+        if (bucket) {
+            *bucket += dt;
+        }
         return ok;
     };
 
@@ -687,12 +694,15 @@ bool cuda_bp_decode(
         return false;
     }
     if (!time_memcpy(cudaMemcpy(ctx->d_sx, sx.data(), sizeof(int) * sx.size(), cudaMemcpyHostToDevice),
-                     error_out, "copy sx")) {
+                     error_out, "copy sx", nullptr)) {
         return false;
     }
     if (!time_memcpy(cudaMemcpy(ctx->d_sz, sz.data(), sizeof(int) * sz.size(), cudaMemcpyHostToDevice),
-                     error_out, "copy sz")) {
+                     error_out, "copy sz", nullptr)) {
         return false;
+    }
+    if (check_warmup < 0) {
+        check_warmup = 0;
     }
     if (check_interval <= 0) {
         check_interval = 1;
@@ -729,14 +739,42 @@ bool cuda_bp_decode(
     if (!check_cuda(cudaEventCreate(&kernel_stop), error_out, "cudaEventCreate stop")) return false;
     if (!check_cuda(cudaEventRecord(kernel_start), error_out, "cudaEventRecord start")) return false;
 
+    cudaEvent_t init_start{};
+    cudaEvent_t init_stop{};
+    if (measure_costs) {
+        if (!check_cuda(cudaEventCreate(&init_start), error_out, "cudaEventCreate init start")) return false;
+        if (!check_cuda(cudaEventCreate(&init_stop), error_out, "cudaEventCreate init stop")) return false;
+        if (!check_cuda(cudaEventRecord(init_start), error_out, "cudaEventRecord init start")) return false;
+    }
+
+    cudaEvent_t check_start{};
+    cudaEvent_t check_stop{};
+    double check_kernel_ms = 0.0;
+    if (measure_costs) {
+        if (!check_cuda(cudaEventCreate(&check_start), error_out, "cudaEventCreate check start")) return false;
+        if (!check_cuda(cudaEventCreate(&check_stop), error_out, "cudaEventCreate check stop")) return false;
+    }
+
     init_messages_kernel<<<x_blocks, threads>>>(ctx->x_edges, ctx->d_x_v2c, ctx->d_x_c2v, d_prior);
     init_messages_kernel<<<z_blocks, threads>>>(ctx->z_edges, ctx->d_z_v2c, ctx->d_z_c2v, d_prior);
     if (!check_cuda(cudaGetLastError(), error_out, "init_messages_kernel")) return false;
+    double init_kernel_ms = 0.0;
+    if (measure_costs) {
+        if (!check_cuda(cudaEventRecord(init_stop), error_out, "cudaEventRecord init stop")) return false;
+        if (!check_cuda(cudaEventSynchronize(init_stop), error_out, "cudaEventSync init stop")) return false;
+        float init_ms = 0.0f;
+        if (!check_cuda(cudaEventElapsedTime(&init_ms, init_start, init_stop),
+                        error_out, "cudaEventElapsedTime init")) {
+            return false;
+        }
+        init_kernel_ms = static_cast<double>(init_ms);
+    }
 
     bool freeze_x = false;
     bool freeze_z = false;
     bool syn_all = false;
     int last_checked_iter = -1;
+    int check_count = 0;
     int iter = 0;
     for (; iter < max_iter; ++iter) {
         if (!freeze_x) {
@@ -803,8 +841,15 @@ bool cuda_bp_decode(
         );
         if (!check_cuda(cudaGetLastError(), error_out, "bp_kernels")) return false;
 
-        bool do_check = ((iter + 1) % check_interval == 0) || (iter + 1 == max_iter);
+        bool do_check = (iter + 1 == max_iter);
+        if (!do_check && (iter + 1 > check_warmup)) {
+            int after_warmup = iter + 1 - check_warmup;
+            do_check = (after_warmup % check_interval == 0);
+        }
         if (do_check) {
+            if (measure_costs) {
+                if (!check_cuda(cudaEventRecord(check_start), error_out, "cudaEventRecord check start")) return false;
+            }
             cudaMemset(ctx->d_syn_x, 1, sizeof(int));
             cudaMemset(ctx->d_syn_z, 1, sizeof(int));
             syndrome_compare_kernel<<<check_x_blocks, threads>>>(
@@ -828,18 +873,29 @@ bool cuda_bp_decode(
                 ctx->d_syn_z
             );
             if (!check_cuda(cudaGetLastError(), error_out, "syndrome_compare_kernel")) return false;
+            if (measure_costs) {
+                if (!check_cuda(cudaEventRecord(check_stop), error_out, "cudaEventRecord check stop")) return false;
+                if (!check_cuda(cudaEventSynchronize(check_stop), error_out, "cudaEventSync check stop")) return false;
+                float check_ms = 0.0f;
+                if (!check_cuda(cudaEventElapsedTime(&check_ms, check_start, check_stop),
+                                error_out, "cudaEventElapsedTime check")) {
+                    return false;
+                }
+                check_kernel_ms += static_cast<double>(check_ms);
+            }
 
             int syn_x_flag = 0;
             int syn_z_flag = 0;
             if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
-                             error_out, "copy syn_x")) return false;
+                             error_out, "copy syn_x", &check_memcpy_ms)) return false;
             if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
-                             error_out, "copy syn_z")) return false;
+                             error_out, "copy syn_z", &check_memcpy_ms)) return false;
 
             bool syn_x = syn_x_flag != 0;
             bool syn_z = syn_z_flag != 0;
             syn_all = syn_x && syn_z;
             last_checked_iter = iter;
+            check_count++;
             if (freeze_syn) {
                 if (syn_x && !freeze_x) {
                     freeze_x = true;
@@ -885,18 +941,20 @@ bool cuda_bp_decode(
         int syn_x_flag = 0;
         int syn_z_flag = 0;
         if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
-                         error_out, "copy syn_x_final")) return false;
+                         error_out, "copy syn_x_final", &check_memcpy_ms)) return false;
         if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
-                         error_out, "copy syn_z_final")) return false;
+                         error_out, "copy syn_z_final", &check_memcpy_ms)) return false;
         syn_all = (syn_x_flag != 0) && (syn_z_flag != 0);
+        check_count++;
     }
 
     out.est.assign(ctx->nvars, 0);
     if (!time_memcpy(cudaMemcpy(out.est.data(), ctx->d_est, sizeof(int) * ctx->nvars, cudaMemcpyDeviceToHost),
-                     error_out, "copy est")) {
+                     error_out, "copy est", nullptr)) {
         return false;
     }
     out.iterations = iter + 1;
+    out.check_count = check_count;
     out.syndrome_match = syn_all;
     float kernel_ms = 0.0f;
     if (!check_cuda(cudaEventRecord(kernel_stop), error_out, "cudaEventRecord stop")) return false;
@@ -906,9 +964,18 @@ bool cuda_bp_decode(
     }
     cudaEventDestroy(kernel_start);
     cudaEventDestroy(kernel_stop);
+    if (measure_costs) {
+        cudaEventDestroy(check_start);
+        cudaEventDestroy(check_stop);
+        cudaEventDestroy(init_start);
+        cudaEventDestroy(init_stop);
+    }
 
     out.kernel_ms = kernel_ms;
     out.memcpy_ms = memcpy_ms;
+    out.check_kernel_ms = check_kernel_ms;
+    out.check_memcpy_ms = check_memcpy_ms;
+    out.init_kernel_ms = init_kernel_ms;
     double total_ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - host_start)
                           .count();
