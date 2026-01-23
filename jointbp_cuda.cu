@@ -493,6 +493,14 @@ __global__ void compare_syndrome_kernel(int n, const int *a, const int *b, int *
     }
 }
 
+__global__ void combine_syn_flags_kernel(const int *syn_x, const int *syn_z, int *syn_all) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        int x_ok = syn_x[0] != 0;
+        int z_ok = syn_z[0] != 0;
+        syn_all[0] = (x_ok && z_ok) ? 1 : 0;
+    }
+}
+
 __global__ void freeze_msgs_kernel(
     int edges,
     const int *edge_var,
@@ -541,6 +549,7 @@ struct CudaBPContext {
     int *d_mismatch_z = nullptr;
     int *d_syn_x = nullptr;
     int *d_syn_z = nullptr;
+    int *d_syn_all = nullptr;
     DeviceMsg *d_x_v2c = nullptr;
     DeviceMsg *d_x_c2v = nullptr;
     DeviceMsg *d_z_v2c = nullptr;
@@ -617,6 +626,7 @@ CudaBPContext *cuda_bp_create(const CudaBPGraph &graph, int device_id, std::stri
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_mismatch_z), sizeof(int)), error_out, "mismatch_z")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_syn_x), sizeof(int)), error_out, "syn_x")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_syn_z), sizeof(int)), error_out, "syn_z")) return nullptr;
+    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_syn_all), sizeof(int)), error_out, "syn_all")) return nullptr;
 
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_x_v2c), sizeof(DeviceMsg) * graph.x_edges), error_out, "x_v2c")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_x_c2v), sizeof(DeviceMsg) * graph.x_edges), error_out, "x_c2v")) return nullptr;
@@ -649,6 +659,7 @@ void cuda_bp_destroy(CudaBPContext *ctx) {
     cudaFree(ctx->d_mismatch_z);
     cudaFree(ctx->d_syn_x);
     cudaFree(ctx->d_syn_z);
+    cudaFree(ctx->d_syn_all);
     cudaFree(ctx->d_x_v2c);
     cudaFree(ctx->d_x_c2v);
     cudaFree(ctx->d_z_v2c);
@@ -807,6 +818,7 @@ bool cuda_bp_decode(
         if (do_check) {
             cudaMemset(ctx->d_syn_x, 1, sizeof(int));
             cudaMemset(ctx->d_syn_z, 1, sizeof(int));
+            cudaMemset(ctx->d_syn_all, 1, sizeof(int));
             syndrome_compare_kernel<<<check_x_blocks, threads>>>(
                 ctx->mX,
                 ctx->d_x_check_offsets,
@@ -827,20 +839,23 @@ bool cuda_bp_decode(
                 0,
                 ctx->d_syn_z
             );
+            combine_syn_flags_kernel<<<1, 1>>>(ctx->d_syn_x, ctx->d_syn_z, ctx->d_syn_all);
             if (!check_cuda(cudaGetLastError(), error_out, "syndrome_compare_kernel")) return false;
 
-            int syn_x_flag = 0;
-            int syn_z_flag = 0;
-            if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
-                             error_out, "copy syn_x")) return false;
-            if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
-                             error_out, "copy syn_z")) return false;
-
-            bool syn_x = syn_x_flag != 0;
-            bool syn_z = syn_z_flag != 0;
-            syn_all = syn_x && syn_z;
+            int syn_all_flag = 0;
+            if (!time_memcpy(cudaMemcpy(&syn_all_flag, ctx->d_syn_all, sizeof(int), cudaMemcpyDeviceToHost),
+                             error_out, "copy syn_all")) return false;
+            syn_all = syn_all_flag != 0;
             last_checked_iter = iter;
             if (freeze_syn) {
+                int syn_x_flag = 0;
+                int syn_z_flag = 0;
+                if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
+                                 error_out, "copy syn_x")) return false;
+                if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
+                                 error_out, "copy syn_z")) return false;
+                bool syn_x = syn_x_flag != 0;
+                bool syn_z = syn_z_flag != 0;
                 if (syn_x && !freeze_x) {
                     freeze_x = true;
                     freeze_msgs_kernel<<<x_blocks, threads>>>(ctx->x_edges, ctx->d_x_edge_var, ctx->d_est, 1, ctx->d_x_v2c, ctx->d_x_c2v);
@@ -860,6 +875,7 @@ bool cuda_bp_decode(
     if (last_checked_iter != iter) {
         cudaMemset(ctx->d_syn_x, 1, sizeof(int));
         cudaMemset(ctx->d_syn_z, 1, sizeof(int));
+        cudaMemset(ctx->d_syn_all, 1, sizeof(int));
         syndrome_compare_kernel<<<check_x_blocks, threads>>>(
             ctx->mX,
             ctx->d_x_check_offsets,
@@ -880,15 +896,13 @@ bool cuda_bp_decode(
             0,
             ctx->d_syn_z
         );
+        combine_syn_flags_kernel<<<1, 1>>>(ctx->d_syn_x, ctx->d_syn_z, ctx->d_syn_all);
         if (!check_cuda(cudaGetLastError(), error_out, "syndrome_compare_kernel_final")) return false;
 
-        int syn_x_flag = 0;
-        int syn_z_flag = 0;
-        if (!time_memcpy(cudaMemcpy(&syn_x_flag, ctx->d_syn_x, sizeof(int), cudaMemcpyDeviceToHost),
-                         error_out, "copy syn_x_final")) return false;
-        if (!time_memcpy(cudaMemcpy(&syn_z_flag, ctx->d_syn_z, sizeof(int), cudaMemcpyDeviceToHost),
-                         error_out, "copy syn_z_final")) return false;
-        syn_all = (syn_x_flag != 0) && (syn_z_flag != 0);
+        int syn_all_flag = 0;
+        if (!time_memcpy(cudaMemcpy(&syn_all_flag, ctx->d_syn_all, sizeof(int), cudaMemcpyDeviceToHost),
+                         error_out, "copy syn_all_final")) return false;
+        syn_all = syn_all_flag != 0;
     }
 
     out.est.assign(ctx->nvars, 0);
