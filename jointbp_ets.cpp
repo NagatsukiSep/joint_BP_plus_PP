@@ -5829,7 +5829,11 @@ int main(int argc, char **argv) {
             double iter_cost_ms = 0.0;
             double check_cost_ms = 0.0;
             if (cuda_costs && res.used_cuda && res.iterations > 0) {
-                iter_cost_ms = res.cuda_kernel_ms / static_cast<double>(res.iterations);
+                double check_kernel_ms = res.cuda_check_kernel_ms;
+                if (res.cuda_check_count == 0) {
+                    check_kernel_ms = 0.0;
+                }
+                iter_cost_ms = (res.cuda_kernel_ms - check_kernel_ms) / static_cast<double>(res.iterations);
                 if (res.cuda_check_count > 0) {
                     check_cost_ms = (res.cuda_check_kernel_ms + res.cuda_check_memcpy_ms) /
                                     static_cast<double>(res.cuda_check_count);
@@ -6430,7 +6434,11 @@ int main(int argc, char **argv) {
         double iter_cost_ms = 0.0;
         double check_cost_ms = 0.0;
         if (cuda_costs && total_iters > 0) {
-            iter_cost_ms = cuda_kernel_ms_sum / static_cast<double>(total_iters);
+            double check_kernel_ms = cuda_check_kernel_ms_sum;
+            if (cuda_check_count_sum == 0) {
+                check_kernel_ms = 0.0;
+            }
+            iter_cost_ms = (cuda_kernel_ms_sum - check_kernel_ms) / static_cast<double>(total_iters);
             if (cuda_check_count_sum > 0) {
                 check_cost_ms = (cuda_check_kernel_ms_sum + cuda_check_memcpy_ms_sum) /
                                 static_cast<double>(cuda_check_count_sum);
