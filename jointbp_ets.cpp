@@ -13,6 +13,7 @@
 #include <deque>
 #include <limits>
 #include <memory>
+#include <map>
 #include <system_error>
 #include <optional>
 #include <random>
@@ -3105,6 +3106,24 @@ static bool write_error_vector(const std::string &path, const std::vector<int> &
     return true;
 }
 
+static bool write_cost_histogram(
+    const std::string &path,
+    double iter_cost,
+    double check_cost,
+    const std::map<int, long long> &counts,
+    long long total
+) {
+    if (total <= 0) return false;
+    std::ofstream ofs(path);
+    if (!ofs) return false;
+    ofs << std::setprecision(12) << std::fixed << iter_cost << " " << check_cost << "\n";
+    for (const auto &entry : counts) {
+        double prob = static_cast<double>(entry.second) / static_cast<double>(total);
+        ofs << entry.first << " " << std::setprecision(12) << std::fixed << prob << "\n";
+    }
+    return true;
+}
+
 struct ETSEntry {
     std::vector<int> vars;
     std::array<int, 2> unsat_checks{};
@@ -4759,6 +4778,9 @@ static void print_usage(const char *prog) {
     std::cerr << "  --report-fail   Print summary on failure to stdout.\n";
     std::cerr << "  --report-ets    Print detailed ETS application status.\n";
     std::cerr << "  --est FILE      Write estimated error vector (trials=1 only)\n";
+    std::cerr << "  --cost-hist FILE C_i C_c\n";
+    std::cerr << "    Write cost histogram file and suppress decode/run summary output.\n";
+    std::cerr << "    Line 1: C_i C_c (iteration cost, check cost). Line 2+: n p[n].\n";
 
     print_help_section("CUDA Acceleration");
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
@@ -4816,6 +4838,10 @@ int main(int argc, char **argv) {
     int max_iter = 50;
     int flip_hist_window = 5;
     double damping = 0.0;
+    std::string cost_hist_path;
+    double cost_hist_iter = 0.0;
+    double cost_hist_check = 0.0;
+    bool cost_hist_enabled = false;
     bool freeze_syn = false;
     bool simulate = false;
     bool verbose = false;
@@ -4835,6 +4861,7 @@ int main(int argc, char **argv) {
     int cuda_check_interval = 1;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
+    std::map<int, long long> iter_hist;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -4869,6 +4896,16 @@ int main(int argc, char **argv) {
             need(1);
             flip_hist_window = std::stoi(argv[++i]);
             if (flip_hist_window < 0) flip_hist_window = 0;
+        } else if (arg == "--cost-hist") {
+            need(3);
+            cost_hist_path = argv[++i];
+            cost_hist_iter = std::stod(argv[++i]);
+            cost_hist_check = std::stod(argv[++i]);
+            if (cost_hist_iter < 0.0 || cost_hist_check < 0.0) {
+                std::cerr << "--cost-hist requires non-negative costs\n";
+                return 1;
+            }
+            cost_hist_enabled = true;
         } else if (arg == "--freeze-syn") {
             freeze_syn = true;
         } else if (arg == "--damping") {
@@ -5481,6 +5518,10 @@ int main(int argc, char **argv) {
         }
         double elapsed_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
 
+        if (cost_hist_enabled) {
+            iter_hist[res.iterations]++;
+        }
+
         bool ok = res.syndrome_match;
         bool ets_pp_ok = res.pp_success_ets;
         bool flip_pp_ok = res.pp_success_flip;
@@ -5737,46 +5778,54 @@ int main(int argc, char **argv) {
             stab_success = 1;
         }
 
-        print_stdout_section("Decode Result");
-        std::cout << "iterations=" << res.iterations << " syndrome_match=" << tf(ok) << "\n";
-        std::cout << "decode_success=" << tf(success) << "\n";
-        std::cout << "pp_enabled=" << tf(enable_pp) << "\n";
-        std::cout << "pp_success=" << tf(pp_success) << "\n";
-        std::cout << "pp_success_ets=" << tf(pp_success_ets) << "\n";
-        std::cout << "pp_success_flip=" << tf(pp_success_flip) << "\n";
-        std::cout << "avg_latency=" << format_latency(latency_sec) << "\n";
-        write_progress_tsv(1, success ? 0 : 1, pp_success ? 1 : 0, pp_success_ets ? 1 : 0,
-                           pp_success_flip ? 1 : 0, stab_success, res.iterations, elapsed_sec);
-        bool syn_x = (sx_hat == sx);
-        bool syn_z = (sz_hat == sz);
-        if (verbose) {
-            if (!syn_x) {
-                print_index_list("us_x", us_x);
-            }
-            if (!syn_z) {
-                print_index_list("us_z", us_z);
-            }
-        }
-        if (!err_path.empty()) {
-            std::cout << "exact_match=" << tf(exact) << "\n";
-            std::cout << "stabilizer_equiv=" << tf(stab_equiv) << "\n";
-            auto diff_x = diff_indices_bits(err, res.est, true);
-            auto diff_z = diff_indices_bits(err, res.est, false);
+        if (!cost_hist_enabled) {
+            print_stdout_section("Decode Result");
+            std::cout << "iterations=" << res.iterations << " syndrome_match=" << tf(ok) << "\n";
+            std::cout << "decode_success=" << tf(success) << "\n";
+            std::cout << "pp_enabled=" << tf(enable_pp) << "\n";
+            std::cout << "pp_success=" << tf(pp_success) << "\n";
+            std::cout << "pp_success_ets=" << tf(pp_success_ets) << "\n";
+            std::cout << "pp_success_flip=" << tf(pp_success_flip) << "\n";
+            std::cout << "avg_latency=" << format_latency(latency_sec) << "\n";
+            bool syn_x = (sx_hat == sx);
+            bool syn_z = (sz_hat == sz);
             if (verbose) {
                 if (!syn_x) {
-                    print_index_list("diff_x", diff_x);
+                    print_index_list("us_x", us_x);
                 }
                 if (!syn_z) {
-                    print_index_list("diff_z", diff_z);
+                    print_index_list("us_z", us_z);
+                }
+            }
+            if (!err_path.empty()) {
+                std::cout << "exact_match=" << tf(exact) << "\n";
+                std::cout << "stabilizer_equiv=" << tf(stab_equiv) << "\n";
+                auto diff_x = diff_indices_bits(err, res.est, true);
+                auto diff_z = diff_indices_bits(err, res.est, false);
+                if (verbose) {
+                    if (!syn_x) {
+                        print_index_list("diff_x", diff_x);
+                    }
+                    if (!syn_z) {
+                        print_index_list("diff_z", diff_z);
+                    }
                 }
             }
         }
+        write_progress_tsv(1, success ? 0 : 1, pp_success ? 1 : 0, pp_success_ets ? 1 : 0,
+                           pp_success_flip ? 1 : 0, stab_success, res.iterations, elapsed_sec);
         if (!est_path.empty()) {
             if (!write_error_vector(est_path, res.est)) {
                 std::cerr << "Failed to write estimate to " << est_path << "\n";
                 return 1;
             }
             std::cout << "Saved estimate: " << est_path << "\n";
+        }
+        if (cost_hist_enabled) {
+            if (!write_cost_histogram(cost_hist_path, cost_hist_iter, cost_hist_check, iter_hist, 1)) {
+                std::cerr << "Failed to write cost histogram: " << cost_hist_path << "\n";
+                return 1;
+            }
         }
         return success ? 0 : 2;
     }
@@ -5899,6 +5948,10 @@ int main(int argc, char **argv) {
                 need_basis ? &hx_basis : nullptr, need_basis ? &hz_basis : nullptr, nullptr,
                 &pp_log_lines
             );
+        }
+
+        if (cost_hist_enabled) {
+            iter_hist[res.iterations]++;
         }
 
         bool bp_ok = res.bp_syndrome_match;
@@ -6323,28 +6376,35 @@ int main(int argc, char **argv) {
     double avg_latency_sec = (latency_samples > 0) ? (latency_sum_sec / latency_samples) : 0.0;
     double exact_rate = (done > 0) ? (static_cast<double>(exact_matches) / static_cast<double>(done)) : 0.0;
 
-    print_stdout_section("Run Summary");
-    std::cout << "trials=" << done << " failures=" << failures
-              << " bp_fail=" << bp_failures
-              << " pp_success=" << pp_success
-              << " flip_pp_success=" << flip_pp_success
-              << " stab_success=" << stab_success
-              << " ets_used=" << ets_used
-              << " ets_saved=" << ets_saves
-              << " ets6_used=" << ets6_used
-              << " ets6_saved=" << ets6_saves
-              << " ets12_used=" << ets12_used
-              << " ets12_saved=" << ets12_saves
-              << " fer=" << std::setprecision(8) << std::fixed << fer;
-    if (has_ci) {
-        std::cout << " ci95=[" << std::setprecision(8) << std::fixed << ci_lo
-                  << "," << std::setprecision(8) << std::fixed << ci_hi << "]";
+    if (cost_hist_enabled) {
+        if (!write_cost_histogram(cost_hist_path, cost_hist_iter, cost_hist_check, iter_hist, done)) {
+            std::cerr << "Failed to write cost histogram: " << cost_hist_path << "\n";
+            return 1;
+        }
+    } else {
+        print_stdout_section("Run Summary");
+        std::cout << "trials=" << done << " failures=" << failures
+                  << " bp_fail=" << bp_failures
+                  << " pp_success=" << pp_success
+                  << " flip_pp_success=" << flip_pp_success
+                  << " stab_success=" << stab_success
+                  << " ets_used=" << ets_used
+                  << " ets_saved=" << ets_saves
+                  << " ets6_used=" << ets6_used
+                  << " ets6_saved=" << ets6_saves
+                  << " ets12_used=" << ets12_used
+                  << " ets12_saved=" << ets12_saves
+                  << " fer=" << std::setprecision(8) << std::fixed << fer;
+        if (has_ci) {
+            std::cout << " ci95=[" << std::setprecision(8) << std::fixed << ci_lo
+                      << "," << std::setprecision(8) << std::fixed << ci_hi << "]";
+        }
+        std::cout << " iters=" << total_iters
+                  << " avg_iter=" << std::setprecision(2) << std::fixed << avg_iter
+                  << " avg_latency=" << format_latency(avg_latency_sec)
+                  << " exact_rate=" << std::setprecision(6) << std::fixed << exact_rate
+                  << " elapsed_s=" << std::setprecision(2) << std::fixed << elapsed << "s"
+                  << "\n";
     }
-    std::cout << " iters=" << total_iters
-              << " avg_iter=" << std::setprecision(2) << std::fixed << avg_iter
-              << " avg_latency=" << format_latency(avg_latency_sec)
-              << " exact_rate=" << std::setprecision(6) << std::fixed << exact_rate
-              << " elapsed_s=" << std::setprecision(2) << std::fixed << elapsed << "s"
-              << "\n";
     return 0;
 }
