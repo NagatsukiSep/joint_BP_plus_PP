@@ -4619,18 +4619,24 @@ static std::string format_progress_line_compact(
     return oss.str();
 }
 
-static void print_iteration_histogram(const std::vector<long long> &hist, long long total) {
-    if (total <= 0 || hist.size() <= 1) return;
-    print_stdout_section("Iteration Histogram");
+static bool write_costs_out(
+    const std::string &path,
+    double iter_cost_ms,
+    double check_cost_ms,
+    const std::vector<long long> &hist,
+    long long total
+) {
+    if (path.empty() || total <= 0 || hist.size() <= 1) return true;
+    std::ofstream out(path);
+    if (!out) return false;
+    out << std::setprecision(8) << std::fixed << iter_cost_ms << " " << check_cost_ms << "\n";
     for (size_t i = 1; i < hist.size(); ++i) {
         long long count = hist[i];
         if (count == 0) continue;
         double frac = static_cast<double>(count) / static_cast<double>(total);
-        std::cout << "iter=" << i
-                  << " count=" << count
-                  << " frac=" << std::setprecision(6) << std::fixed << frac
-                  << "\n";
+        out << i << " " << std::setprecision(10) << std::fixed << frac << "\n";
     }
+    return true;
 }
 
 static void report_progress(
@@ -4773,17 +4779,16 @@ static void print_usage(const char *prog) {
     std::cerr << "    If 0, do not use history union; use only the last flip.\n";
     std::cerr << "  --freeze-syn    Freeze BP on a side once its syndrome is satisfied.\n";
     std::cerr << "  --no-pp         Disable PP (ETS/flip).\n";
-    std::cerr << "  --iter-hist     Print iteration histogram on completion.\n";
     std::cerr << "  --report-fail   Print summary on failure to stdout.\n";
     std::cerr << "  --report-ets    Print detailed ETS application status.\n";
     std::cerr << "  --est FILE      Write estimated error vector (trials=1 only)\n";
+    std::cerr << "  --costs-out FILE  Write cost/histogram summary to FILE.\n";
 
     print_help_section("CUDA Acceleration");
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
     std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
     std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
-    std::cerr << "  --cuda-costs    Report CUDA check/iteration cost breakdown.\n";
 
     print_help_section("ETS Files");
     std::cerr << "  --ets6-x FILE --ets6-z FILE\n";
@@ -4857,6 +4862,7 @@ int main(int argc, char **argv) {
     bool cuda_costs = false;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
+    std::string costs_out_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -4944,8 +4950,11 @@ int main(int argc, char **argv) {
             report_fail = true;
         } else if (arg == "--report-ets") {
             report_ets = true;
-        } else if (arg == "--iter-hist") {
+        } else if (arg == "--costs-out") {
+            need(1);
+            costs_out_path = argv[++i];
             iter_hist = true;
+            cuda_costs = true;
         } else if (arg == "--save-fail-prefix") {
             need(1);
             save_fail_prefix = argv[++i];
@@ -4971,8 +4980,6 @@ int main(int argc, char **argv) {
             if (cuda_check_interval <= 0) {
                 cuda_check_interval = 1;
             }
-        } else if (arg == "--cuda-costs") {
-            cuda_costs = true;
         } else if (arg == "--trial-index") {
             need(1);
             trial_index = std::stoll(argv[++i]);
@@ -5781,18 +5788,6 @@ int main(int argc, char **argv) {
         std::cout << "pp_success_ets=" << tf(pp_success_ets) << "\n";
         std::cout << "pp_success_flip=" << tf(pp_success_flip) << "\n";
         std::cout << "avg_latency=" << format_latency(latency_sec) << "\n";
-        if (cuda_costs && res.used_cuda && res.cuda_check_count > 0) {
-            double avg_iter_kernel_ms = res.cuda_kernel_ms / static_cast<double>(res.iterations);
-            double avg_check_kernel_ms = res.cuda_check_kernel_ms / static_cast<double>(res.cuda_check_count);
-            double avg_check_memcpy_ms = res.cuda_check_memcpy_ms / static_cast<double>(res.cuda_check_count);
-            std::cout << "cuda_check_count=" << res.cuda_check_count << "\n";
-            std::cout << "cuda_kernel_ms_per_iter=" << std::setprecision(4) << std::fixed
-                      << avg_iter_kernel_ms << "\n";
-            std::cout << "cuda_check_kernel_ms_per_check=" << std::setprecision(4) << std::fixed
-                      << avg_check_kernel_ms << "\n";
-            std::cout << "cuda_check_memcpy_ms_per_check=" << std::setprecision(4) << std::fixed
-                      << avg_check_memcpy_ms << "\n";
-        }
         write_progress_tsv(1, success ? 0 : 1, pp_success ? 1 : 0, pp_success_ets ? 1 : 0,
                            pp_success_flip ? 1 : 0, stab_success, res.iterations, elapsed_sec);
         bool syn_x = (sx_hat == sx);
@@ -5831,7 +5826,18 @@ int main(int argc, char **argv) {
             if (res.iterations >= 1 && res.iterations <= max_iter) {
                 hist[static_cast<size_t>(res.iterations)] = 1;
             }
-            print_iteration_histogram(hist, 1);
+            double iter_cost_ms = 0.0;
+            double check_cost_ms = 0.0;
+            if (cuda_costs && res.used_cuda && res.iterations > 0) {
+                iter_cost_ms = res.cuda_kernel_ms / static_cast<double>(res.iterations);
+                if (res.cuda_check_count > 0) {
+                    check_cost_ms = (res.cuda_check_kernel_ms + res.cuda_check_memcpy_ms) /
+                                    static_cast<double>(res.cuda_check_count);
+                }
+            }
+            if (!write_costs_out(costs_out_path, iter_cost_ms, check_cost_ms, hist, 1)) {
+                std::cerr << "Failed to write costs output: " << costs_out_path << "\n";
+            }
         }
         return success ? 0 : 2;
     }
@@ -6420,21 +6426,19 @@ int main(int argc, char **argv) {
               << " exact_rate=" << std::setprecision(6) << std::fixed << exact_rate
               << " elapsed_s=" << std::setprecision(2) << std::fixed << elapsed << "s"
               << "\n";
-    if (cuda_costs && cuda_check_count_sum > 0) {
-        double avg_check_kernel_ms = cuda_check_kernel_ms_sum / static_cast<double>(cuda_check_count_sum);
-        double avg_check_memcpy_ms = cuda_check_memcpy_ms_sum / static_cast<double>(cuda_check_count_sum);
-        double avg_iter_kernel_ms = cuda_kernel_ms_sum / static_cast<double>(total_iters);
-        std::cout << "cuda_check_count=" << cuda_check_count_sum
-                  << " cuda_kernel_ms_per_iter=" << std::setprecision(4) << std::fixed
-                  << avg_iter_kernel_ms
-                  << " cuda_check_kernel_ms_per_check=" << std::setprecision(4) << std::fixed
-                  << avg_check_kernel_ms
-                  << " cuda_check_memcpy_ms_per_check=" << std::setprecision(4) << std::fixed
-                  << avg_check_memcpy_ms
-                  << "\n";
-    }
     if (iter_hist) {
-        print_iteration_histogram(iter_hist_counts, done);
+        double iter_cost_ms = 0.0;
+        double check_cost_ms = 0.0;
+        if (cuda_costs && total_iters > 0) {
+            iter_cost_ms = cuda_kernel_ms_sum / static_cast<double>(total_iters);
+            if (cuda_check_count_sum > 0) {
+                check_cost_ms = (cuda_check_kernel_ms_sum + cuda_check_memcpy_ms_sum) /
+                                static_cast<double>(cuda_check_count_sum);
+            }
+        }
+        if (!write_costs_out(costs_out_path, iter_cost_ms, check_cost_ms, iter_hist_counts, done)) {
+            std::cerr << "Failed to write costs output: " << costs_out_path << "\n";
+        }
     }
     return 0;
 }
