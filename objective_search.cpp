@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <algorithm>
+#include <iomanip>
 #include <string>
 #include <vector>
 
@@ -16,7 +17,7 @@ struct Inputs
 
 static void usage(const char *prog)
 {
-    std::cerr << "Usage: " << prog << " input_file\n";
+    std::cerr << "Usage: " << prog << " input_file [output_tsv]\n";
 }
 
 static bool read_input_file(const std::string &path, Inputs &out)
@@ -66,29 +67,50 @@ static bool read_input_file(const std::string &path, Inputs &out)
     return have_header;
 }
 
-// TODO: Replace with your real objective function.
 static double compute_objective(int W, int I, const Inputs &in)
 {
-    // Placeholder: simple weighted sum using p[n].
     double acc = 0.0;
     for (size_t n = 0; n < in.p.size(); ++n)
     {
-        if (n > W)
+        if (in.p[n] == 0.0)
+            continue;
+
+        // 収束が W 以前でも、最初のチェックは W+I なので k>=1
+        int k = 1;
+        if (static_cast<int>(n) > W)
         {
-            int k = (n - W) / I + ((n - W) % I != 0 ? 1 : 0);
-            acc += in.p[n] * ((in.C_c + in.C_i * I) * k + in.C_i * W - in.C_i * I);
+            int diff = static_cast<int>(n) - W;
+            k = (diff + I - 1) / I; // ceil((n-W)/I)
         }
-        else
-        {
-            acc += in.p[n] * (in.C_i * W + in.C_c * I);
-        }
+
+        // 実際に停止する反復回数
+        int l = W + I * k;
+
+        acc += in.p[n] * (in.C_i * l + in.C_c * k);
     }
     return acc;
 }
 
+static std::string default_output_path(const std::string &input_path)
+{
+    size_t slash = input_path.find_last_of("/\\");
+    std::string dir = (slash == std::string::npos) ? "" : input_path.substr(0, slash + 1);
+    std::string file = (slash == std::string::npos) ? input_path : input_path.substr(slash + 1);
+    const std::string suffix = "_costs.txt";
+    if (file.size() >= suffix.size() &&
+        file.compare(file.size() - suffix.size(), suffix.size(), suffix) == 0)
+    {
+        std::string base = file.substr(0, file.size() - suffix.size());
+        return dir + base + "_objective.tsv";
+    }
+    size_t dot = file.find_last_of('.');
+    std::string base = (dot == std::string::npos) ? file : file.substr(0, dot);
+    return dir + base + "_objective.tsv";
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2)
+    if (argc != 2 && argc != 3)
     {
         usage(argv[0]);
         return 1;
@@ -123,13 +145,14 @@ int main(int argc, char **argv)
     const int W_min = 0;
     const int W_max = n_up;
 
-    struct Result {
+    struct Result
+    {
         int W;
         int I;
         double obj;
     };
     std::vector<Result> top;
-    top.reserve(5);
+    top.reserve(10);
 
     for (int W = W_min; W <= W_max; ++W)
     {
@@ -139,19 +162,36 @@ int main(int argc, char **argv)
         {
             const double obj = compute_objective(W, I, in);
             top.push_back(Result{W, I, obj});
-            std::sort(top.begin(), top.end(), [](const Result &a, const Result &b) {
-                return a.obj < b.obj;
-            });
-            if (top.size() > 5) top.pop_back();
+            std::sort(top.begin(), top.end(), [](const Result &a, const Result &b)
+                      { return a.obj < b.obj; });
+            if (top.size() > 10)
+                top.pop_back();
         }
     }
 
-    std::cout << "top5 (best to worst)\n";
+    const std::string output_path = (argc == 3) ? argv[2] : default_output_path(argv[1]);
+    std::ofstream out(output_path);
+    if (!out)
+    {
+        std::cerr << "Failed to open output file: " << output_path << "\n";
+        return 1;
+    }
+
+    out << "interval\twarmup\tobjective\n";
+    out << std::setprecision(17);
+    for (size_t i = 0; i < top.size(); ++i)
+    {
+        out << top[i].I << "\t" << top[i].W << "\t" << top[i].obj << "\n";
+    }
+    out.close();
+
+    std::cout << "top10 (best to worst)\n";
     for (size_t i = 0; i < top.size(); ++i)
     {
         std::cout << (i + 1) << ": W=" << top[i].W
                   << " I=" << top[i].I
                   << " obj=" << top[i].obj << "\n";
     }
+    std::cerr << "Wrote results to " << output_path << "\n";
     return 0;
 }

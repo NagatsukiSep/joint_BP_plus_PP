@@ -739,6 +739,14 @@ bool cuda_bp_decode(
     if (!check_cuda(cudaEventCreate(&kernel_stop), error_out, "cudaEventCreate stop")) return false;
     if (!check_cuda(cudaEventRecord(kernel_start), error_out, "cudaEventRecord start")) return false;
 
+    cudaEvent_t init_start{};
+    cudaEvent_t init_stop{};
+    if (measure_costs) {
+        if (!check_cuda(cudaEventCreate(&init_start), error_out, "cudaEventCreate init start")) return false;
+        if (!check_cuda(cudaEventCreate(&init_stop), error_out, "cudaEventCreate init stop")) return false;
+        if (!check_cuda(cudaEventRecord(init_start), error_out, "cudaEventRecord init start")) return false;
+    }
+
     cudaEvent_t check_start{};
     cudaEvent_t check_stop{};
     double check_kernel_ms = 0.0;
@@ -750,6 +758,17 @@ bool cuda_bp_decode(
     init_messages_kernel<<<x_blocks, threads>>>(ctx->x_edges, ctx->d_x_v2c, ctx->d_x_c2v, d_prior);
     init_messages_kernel<<<z_blocks, threads>>>(ctx->z_edges, ctx->d_z_v2c, ctx->d_z_c2v, d_prior);
     if (!check_cuda(cudaGetLastError(), error_out, "init_messages_kernel")) return false;
+    double init_kernel_ms = 0.0;
+    if (measure_costs) {
+        if (!check_cuda(cudaEventRecord(init_stop), error_out, "cudaEventRecord init stop")) return false;
+        if (!check_cuda(cudaEventSynchronize(init_stop), error_out, "cudaEventSync init stop")) return false;
+        float init_ms = 0.0f;
+        if (!check_cuda(cudaEventElapsedTime(&init_ms, init_start, init_stop),
+                        error_out, "cudaEventElapsedTime init")) {
+            return false;
+        }
+        init_kernel_ms = static_cast<double>(init_ms);
+    }
 
     bool freeze_x = false;
     bool freeze_z = false;
@@ -948,12 +967,15 @@ bool cuda_bp_decode(
     if (measure_costs) {
         cudaEventDestroy(check_start);
         cudaEventDestroy(check_stop);
+        cudaEventDestroy(init_start);
+        cudaEventDestroy(init_stop);
     }
 
     out.kernel_ms = kernel_ms;
     out.memcpy_ms = memcpy_ms;
     out.check_kernel_ms = check_kernel_ms;
     out.check_memcpy_ms = check_memcpy_ms;
+    out.init_kernel_ms = init_kernel_ms;
     double total_ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - host_start)
                           .count();

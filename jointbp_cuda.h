@@ -38,6 +38,7 @@ struct CudaBPResult {
     double memcpy_ms = 0.0;
     double check_kernel_ms = 0.0;
     double check_memcpy_ms = 0.0;
+    double init_kernel_ms = 0.0;
     double host_ms = 0.0;
 };
 

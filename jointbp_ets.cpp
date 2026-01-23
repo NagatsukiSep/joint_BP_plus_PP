@@ -1936,6 +1936,7 @@ struct JointBPResult {
     int cuda_check_count = 0;
     double cuda_check_kernel_ms = 0.0;
     double cuda_check_memcpy_ms = 0.0;
+    double cuda_init_kernel_ms = 0.0;
     double cuda_host_ms = 0.0;
 };
 
@@ -5502,6 +5503,7 @@ int main(int argc, char **argv) {
                 res.cuda_check_count = cuda_res.check_count;
                 res.cuda_check_kernel_ms = cuda_res.check_kernel_ms;
                 res.cuda_check_memcpy_ms = cuda_res.check_memcpy_ms;
+                res.cuda_init_kernel_ms = cuda_res.init_kernel_ms;
                 res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
@@ -5833,7 +5835,8 @@ int main(int argc, char **argv) {
                 if (res.cuda_check_count == 0) {
                     check_kernel_ms = 0.0;
                 }
-                iter_cost_ms = (res.cuda_kernel_ms - check_kernel_ms) / static_cast<double>(res.iterations);
+                iter_cost_ms = (res.cuda_kernel_ms - check_kernel_ms - res.cuda_init_kernel_ms) /
+                               static_cast<double>(res.iterations);
                 if (res.cuda_check_count > 0) {
                     check_cost_ms = (res.cuda_check_kernel_ms + res.cuda_check_memcpy_ms) /
                                     static_cast<double>(res.cuda_check_count);
@@ -5888,6 +5891,7 @@ int main(int argc, char **argv) {
     long long cuda_samples = 0;
     double cuda_check_kernel_ms_sum = 0.0;
     double cuda_check_memcpy_ms_sum = 0.0;
+    double cuda_init_kernel_ms_sum = 0.0;
     long long cuda_check_count_sum = 0;
     std::vector<long long> ets_used_counts(ets_labels.size(), 0);
     auto record_ets_labels = [&](const std::vector<std::string> &labels) {
@@ -5956,6 +5960,7 @@ int main(int argc, char **argv) {
                 res.cuda_check_count = cuda_res.check_count;
                 res.cuda_check_kernel_ms = cuda_res.check_kernel_ms;
                 res.cuda_check_memcpy_ms = cuda_res.check_memcpy_ms;
+                res.cuda_init_kernel_ms = cuda_res.init_kernel_ms;
                 res.cuda_host_ms = cuda_res.host_ms;
             }
             if (!ok) {
@@ -6219,6 +6224,7 @@ int main(int argc, char **argv) {
             cuda_kernel_ms_sum += res.cuda_kernel_ms;
             cuda_memcpy_ms_sum += res.cuda_memcpy_ms;
             cuda_host_ms_sum += res.cuda_host_ms;
+            cuda_init_kernel_ms_sum += res.cuda_init_kernel_ms;
             cuda_samples++;
             if (cuda_costs && res.cuda_check_count > 0) {
                 cuda_check_kernel_ms_sum += res.cuda_check_kernel_ms;
@@ -6438,7 +6444,8 @@ int main(int argc, char **argv) {
             if (cuda_check_count_sum == 0) {
                 check_kernel_ms = 0.0;
             }
-            iter_cost_ms = (cuda_kernel_ms_sum - check_kernel_ms) / static_cast<double>(total_iters);
+            iter_cost_ms = (cuda_kernel_ms_sum - check_kernel_ms - cuda_init_kernel_ms_sum) /
+                           static_cast<double>(total_iters);
             if (cuda_check_count_sum > 0) {
                 check_cost_ms = (cuda_check_kernel_ms_sum + cuda_check_memcpy_ms_sum) /
                                 static_cast<double>(cuda_check_count_sum);
