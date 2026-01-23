@@ -4786,6 +4786,7 @@ static void print_usage(const char *prog) {
     print_help_section("Output Notes");
     std::cerr << "  syndrome_match=true means the estimated error's syndrome matches the input.\n";
     std::cerr << "  It does not necessarily match the true error.\n";
+    std::cerr << "  In --cuda mode, syndrome checks run on GPU and only the combined flag is copied.\n";
 }
 
 }  // namespace
