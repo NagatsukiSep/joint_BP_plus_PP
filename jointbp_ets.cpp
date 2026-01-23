@@ -4789,7 +4789,6 @@ static void print_usage(const char *prog) {
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
     std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
     std::cerr << "  --cuda-graph    Use CUDA Graphs to reduce launch overhead\n";
-    std::cerr << "  --cuda-graph-log  Print CUDA graph build/reuse counts\n";
     std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
 
@@ -4864,7 +4863,6 @@ int main(int argc, char **argv) {
     int cuda_check_interval = 1;
     bool cuda_costs = false;
     bool cuda_use_graph = false;
-    bool cuda_graph_log = false;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
     std::string costs_out_path;
@@ -4975,8 +4973,6 @@ int main(int argc, char **argv) {
             cuda_device = std::stoi(argv[++i]);
         } else if (arg == "--cuda-graph") {
             cuda_use_graph = true;
-        } else if (arg == "--cuda-graph-log") {
-            cuda_graph_log = true;
         } else if (arg == "--cuda-check-warmup") {
             need(1);
             cuda_check_warmup = std::stoi(argv[++i]);
@@ -5501,7 +5497,7 @@ int main(int argc, char **argv) {
             std::string cuda_error;
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
-                                     cuda_costs, cuda_use_graph, cuda_graph_log,
+                                     cuda_costs, cuda_use_graph,
                                      freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
@@ -5959,7 +5955,7 @@ int main(int argc, char **argv) {
             std::string cuda_error;
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
-                                     cuda_costs, cuda_use_graph, cuda_graph_log,
+                                     cuda_costs, cuda_use_graph,
                                      freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";

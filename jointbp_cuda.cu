@@ -531,8 +531,6 @@ struct CudaBPContext {
     bool graph_ready = false;
     CudaMsg graph_prior{{0.0, 0.0, 0.0, 0.0}};
     double graph_damping = 0.0;
-    long long graph_builds = 0;
-    long long graph_reuses = 0;
     int *d_x_check_offsets = nullptr;
     int *d_x_check_edges = nullptr;
     int *d_x_edge_var = nullptr;
@@ -690,7 +688,6 @@ bool cuda_bp_decode(
     int check_interval,
     bool measure_costs,
     bool use_graph,
-    bool log_graph,
     bool freeze_syn,
     double damping,
     CudaBPResult &out,
@@ -867,7 +864,6 @@ bool cuda_bp_decode(
         return false;
     }
 
-    bool built_graph = false;
     if (use_graph) {
         bool prior_match = true;
         for (int i = 0; i < 4; ++i) {
@@ -925,10 +921,6 @@ bool cuda_bp_decode(
             ctx->graph_ready = true;
             ctx->graph_prior = prior;
             ctx->graph_damping = damping;
-            ctx->graph_builds++;
-            built_graph = true;
-        } else {
-            ctx->graph_reuses++;
         }
     }
 
@@ -1108,12 +1100,6 @@ bool cuda_bp_decode(
                           std::chrono::steady_clock::now() - host_start)
                           .count();
     out.host_ms = std::max(0.0, total_ms - memcpy_ms - static_cast<double>(kernel_ms));
-    if (use_graph && log_graph) {
-        std::cerr << "[cuda-graph] build=" << ctx->graph_builds
-                  << " reuse=" << ctx->graph_reuses
-                  << " this=" << (built_graph ? "build" : "reuse")
-                  << "\n";
-    }
     return true;
 }
 
