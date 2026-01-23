@@ -55,6 +55,7 @@ nvcc -O2 -std=c++17 -DUSE_CUDA -DUSE_CUDA_FP32 -o jointbp_ets jointbp_ets.cpp jo
 ```
 
 Use `--cuda` (and optionally `--cuda-device`) to enable it:
+To reduce kernel launch overhead, add `--cuda-graph` (disables `--cuda-costs`).
 
 ```sh
 ./jointbp_ets \

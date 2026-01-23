@@ -4788,6 +4788,8 @@ static void print_usage(const char *prog) {
     print_help_section("CUDA Acceleration");
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
     std::cerr << "  --cuda-device N Select CUDA device (default: 0)\n";
+    std::cerr << "  --cuda-graph    Use CUDA Graphs to reduce launch overhead\n";
+    std::cerr << "  --cuda-graph-log  Print CUDA graph build/reuse counts\n";
     std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
 
@@ -4861,6 +4863,8 @@ int main(int argc, char **argv) {
     int cuda_check_warmup = 0;
     int cuda_check_interval = 1;
     bool cuda_costs = false;
+    bool cuda_use_graph = false;
+    bool cuda_graph_log = false;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
     std::string costs_out_path;
@@ -4969,6 +4973,10 @@ int main(int argc, char **argv) {
         } else if (arg == "--cuda-device") {
             need(1);
             cuda_device = std::stoi(argv[++i]);
+        } else if (arg == "--cuda-graph") {
+            cuda_use_graph = true;
+        } else if (arg == "--cuda-graph-log") {
+            cuda_graph_log = true;
         } else if (arg == "--cuda-check-warmup") {
             need(1);
             cuda_check_warmup = std::stoi(argv[++i]);
@@ -5404,6 +5412,10 @@ int main(int argc, char **argv) {
     if (use_cuda && !cuda_allowed) {
         std::cerr << "CUDA BP requires --no-pp and no verbose/report-ets; falling back to CPU.\n";
     }
+    if (cuda_use_graph && cuda_costs) {
+        std::cerr << "CUDA graph mode disables --cuda-costs; ignoring --cuda-costs.\n";
+        cuda_costs = false;
+    }
     CudaCtxPtr cuda_ctx;
     if (cuda_allowed) {
         CudaBPGraph cuda_graph = build_cuda_graph(x_checks, z_checks, var_to_x, var_to_z, nvars);
@@ -5489,7 +5501,8 @@ int main(int argc, char **argv) {
             std::string cuda_error;
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
-                                     cuda_costs, freeze_syn, damping, cuda_res, &cuda_error);
+                                     cuda_costs, cuda_use_graph, cuda_graph_log,
+                                     freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
             } else {
@@ -5946,7 +5959,8 @@ int main(int argc, char **argv) {
             std::string cuda_error;
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
-                                     cuda_costs, freeze_syn, damping, cuda_res, &cuda_error);
+                                     cuda_costs, cuda_use_graph, cuda_graph_log,
+                                     freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
             } else {
