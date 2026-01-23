@@ -54,7 +54,7 @@ if [ "$COSTS_OUT" -eq 1 ]; then
   esac
 fi
 
-CMD=(./jointbp_ets --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt --simulate --p "$P" --trials "$TRIALS" --max-iter 200 --no-pp --cuda --cuda-device 0 --cuda-check-interval "$CUDA_CHECK_INTERVAL" --seed 1234 --report-every 1000 --cuda-check-warmup "$CUDA_CHECK_WARMUP")
+CMD=(./jointbp_ets --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt --simulate --p "$P" --trials "$TRIALS" --max-iter 200 --no-pp --cuda --cuda-device 0 --cuda-graph --cuda-check-interval "$CUDA_CHECK_INTERVAL" --seed 1234 --report-every 1000 --cuda-check-warmup "$CUDA_CHECK_WARMUP")
 if [ "$COSTS_OUT" -eq 1 ]; then
   if [ -n "${COSTS_FILE:-}" ]; then
     CMD+=(--costs-out "$COSTS_FILE")
