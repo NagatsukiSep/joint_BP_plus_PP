@@ -4620,17 +4620,19 @@ static std::string format_progress_line_compact(
     return oss.str();
 }
 
-static bool write_costs_out(
+static bool write_hist_out(
     const std::string &path,
-    double iter_cost_ms,
-    double check_cost_ms,
     const std::vector<long long> &hist,
-    long long total
+    long long total,
+    double iter_cost_ms,
+    double check_cost_ms
 ) {
     if (path.empty() || total <= 0 || hist.size() <= 1) return true;
     std::ofstream out(path);
     if (!out) return false;
-    out << std::setprecision(8) << std::fixed << iter_cost_ms << " " << check_cost_ms << "\n";
+    out << "# costs " << std::setprecision(8) << std::fixed << iter_cost_ms
+        << " " << std::setprecision(8) << std::fixed << check_cost_ms << "\n";
+    out << "# iter fraction\n";
     for (size_t i = 1; i < hist.size(); ++i) {
         long long count = hist[i];
         if (count == 0) continue;
@@ -4783,7 +4785,7 @@ static void print_usage(const char *prog) {
     std::cerr << "  --report-fail   Print summary on failure to stdout.\n";
     std::cerr << "  --report-ets    Print detailed ETS application status.\n";
     std::cerr << "  --est FILE      Write estimated error vector (trials=1 only)\n";
-    std::cerr << "  --costs-out FILE  Write cost/histogram summary to FILE.\n";
+    std::cerr << "  --iter-hist-out FILE  Write iteration histogram (probability distribution) to FILE.\n";
 
     print_help_section("CUDA Acceleration");
     std::cerr << "  --cuda          Enable CUDA BP (requires CUDA build, --no-pp)\n";
@@ -4865,7 +4867,7 @@ int main(int argc, char **argv) {
     bool cuda_use_graph = false;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
-    std::string costs_out_path;
+    std::string hist_out_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -4953,12 +4955,11 @@ int main(int argc, char **argv) {
             report_fail = true;
         } else if (arg == "--report-ets") {
             report_ets = true;
-        } else if (arg == "--costs-out") {
-            need(1);
-            costs_out_path = argv[++i];
-            iter_hist = true;
-            cuda_costs = true;
-        } else if (arg == "--save-fail-prefix") {
+    } else if (arg == "--iter-hist-out") {
+        need(1);
+        hist_out_path = argv[++i];
+        iter_hist = true;
+    } else if (arg == "--save-fail-prefix") {
             need(1);
             save_fail_prefix = argv[++i];
         } else if (arg == "--progress-tsv") {
@@ -5851,8 +5852,8 @@ int main(int argc, char **argv) {
                                     static_cast<double>(res.cuda_check_count);
                 }
             }
-            if (!write_costs_out(costs_out_path, iter_cost_ms, check_cost_ms, hist, 1)) {
-                std::cerr << "Failed to write costs output: " << costs_out_path << "\n";
+            if (!write_hist_out(hist_out_path, hist, 1, iter_cost_ms, check_cost_ms)) {
+                std::cerr << "Failed to write histogram output: " << hist_out_path << "\n";
             }
         }
         return success ? 0 : 2;
@@ -6461,8 +6462,8 @@ int main(int argc, char **argv) {
                                 static_cast<double>(cuda_check_count_sum);
             }
         }
-        if (!write_costs_out(costs_out_path, iter_cost_ms, check_cost_ms, iter_hist_counts, done)) {
-            std::cerr << "Failed to write costs output: " << costs_out_path << "\n";
+        if (!write_hist_out(hist_out_path, iter_hist_counts, done, iter_cost_ms, check_cost_ms)) {
+            std::cerr << "Failed to write histogram output: " << hist_out_path << "\n";
         }
     }
     return 0;
