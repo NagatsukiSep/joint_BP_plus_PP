@@ -25,6 +25,7 @@ module purge || true
 module load cuda || true
 
 # 実行（例：あなたの実行コマンドに置き換え）
+./build.sh
 ./sweep_warmup_interval.sh --max-warmup 14 --trials 50000 --out data/results_warmup_interval.tsv
 
 echo "===== JOB END ====="
