@@ -178,3 +178,17 @@ Override with `--ets6-x`, `--ets6-z`, `--ets12-x`, `--ets12-z`, or `--ets8-path4
 
 - `--no-pp` disables post-processing.
 - `--verbose` and `--verbose-all` control per-iteration output.
+
+## run.sh helper
+
+`run.sh` builds the full decoder command (`jointbp_ets --params ... --simulate --p 0.04 --trials 50000 --no-pp --cuda --cuda-graph --cuda-device 0 --cuda-check-interval 1 --cuda-check-warmup 0 --seed 106 --report-every <trials>`) while letting you tweak a few knobs:
+
+- `--p VALUE`: override the noise rate passed to `jointbp_ets`.
+- `--trials VALUE`: change the total number of trials per run (default 50000).
+- `--check-warmup VALUE`: sets the internal `--cuda-check-warmup` argument.
+- `--interval VALUE`: controls `--cuda-check-interval`.
+- `--pre-runs VALUE`: run the first VALUE trials purely for GPU warmup (same seed/stream) before the measured 50k trials.
+- `--report-every VALUE`: pass through to `jointbp_ets`; defaults to 1000 (but you can set it to `--trials` when you want to print only once, as `sweep_warmup_interval.sh` does).
+- `--iter-hist-out PATH` and `--hist-file PATH`: dump the iteration histogram; enabling them forces the helper’s histogram mode (it also resets `--cuda-check-warmup`/`--cuda-check-interval` to the default values so the histogram run stays consistent).
+
+Use `./run.sh --help` for a reminder of these options if you need playback-friendly defaults.

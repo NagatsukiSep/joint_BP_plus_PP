@@ -2,13 +2,14 @@
 set -euo pipefail
 
 # Hardcoded sweep limit
-N=30
+MAX_WARMUP=30
 
 P=0.04
+TRIALS=50000
 OUT_TSV=data/results_warmup_interval.tsv
 
 usage() {
-  echo "Usage: $0 [--p value] [--out output_tsv]" >&2
+  echo "Usage: $0 [--p value] [--out output_tsv] [--max-warmup N] [--trials N]" >&2
 }
 
 while [ $# -gt 0 ]; do
@@ -21,9 +22,17 @@ while [ $# -gt 0 ]; do
       OUT_TSV="${2:-}"
       shift 2
       ;;
+    --trials)
+      TRIALS="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
+      ;;
+    --max-warmup)
+      MAX_WARMUP="${2:-}"
+      shift 2
       ;;
     *)
       echo "Unknown argument: $1" >&2
@@ -45,12 +54,12 @@ esac
 
 echo -e "interval\twarmup\tlatency_ms" > "$OUT_TSV"
 
-for ((warmup=0; warmup<=N; warmup++)); do
-  max_interval=$((N - warmup + 1))
+for ((warmup=0; warmup<=MAX_WARMUP; warmup++)); do
+  max_interval=$((MAX_WARMUP - warmup + 1))
   for ((interval=1; interval<=max_interval; interval++)); do
     echo "Running interval=$interval warmup=$warmup" >&2
     tmp=$(mktemp)
-    ./run.sh --p "$P" --warmup "$warmup" --interval "$interval" \
+    ./run.sh --p "$P" --check-warmup "$warmup" --interval "$interval" --report-every "$TRIALS" --trials "$TRIALS" \
       | tee "$tmp" >/dev/null
 
     latency_ms=$(awk '
