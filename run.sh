@@ -1,4 +1,5 @@
 P=0.04
+SEED=106
 TRIALS=50000
 CUDA_CHECK_WARMUP=0
 CUDA_CHECK_INTERVAL=1
@@ -16,6 +17,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --p)
       P="${2:-}"
+      shift 2
+      ;;
+    --seed)
+      SEED="${2:-}"
       shift 2
       ;;
     --check-warmup)
@@ -85,7 +90,7 @@ if [ "$PRE_RUNS" -gt 0 ]; then
   echo "Pre-run: $PRE_RUNS trials (no-output)"
   WARMUP_CMD=("${BASE_CMD[@]}"
     --trials "$PRE_RUNS"
-    --seed 106
+    --seed "$SEED"
     --report-every 0
   )
   if ! "${WARMUP_CMD[@]}" >/dev/null 2>&1; then
@@ -96,7 +101,7 @@ fi
 
 CMD=("${BASE_CMD[@]}"
   --trials "$TRIALS"
-  --seed 106
+  --seed "$SEED"
   --report-every "$REPORT_EVERY"
 )
 

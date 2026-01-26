@@ -5,6 +5,7 @@ set -euo pipefail
 MAX_WARMUP=30
 
 P=0.04
+SEED=106
 TRIALS=50000
 OUT_TSV=data/results_warmup_interval.tsv
 
@@ -16,6 +17,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --p)
       P="${2:-}"
+      shift 2
+      ;;
+    --seed)
+      SEED="${2:-}"
       shift 2
       ;;
     --out)
@@ -59,7 +64,7 @@ for ((warmup=0; warmup<=MAX_WARMUP; warmup++)); do
   for ((interval=1; interval<=max_interval; interval++)); do
     echo "Running interval=$interval warmup=$warmup" >&2
     tmp=$(mktemp)
-    ./run.sh --p "$P" --check-warmup "$warmup" --interval "$interval" --report-every "$TRIALS" --trials "$TRIALS" \
+    ./run.sh --p "$P" --seed "$SEED" --check-warmup "$warmup" --interval "$interval" --report-every "$TRIALS" --trials "$TRIALS" \
       | tee "$tmp" >/dev/null
 
     latency_ms=$(awk '
