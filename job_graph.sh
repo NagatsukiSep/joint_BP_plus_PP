@@ -24,8 +24,8 @@ module purge || true
 module load cuda || true
 
 # run experiments
-./build.sh
-# double
+nvcc -O2 -std=c++17 -DUSE_CUDA -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
+# no graph
 echo "Running NO Graph benchmark"
 ./jointbp_ets \
     --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt --simulate --p 0.04 --max-iter 200 --seed 106 --no-pp --cuda --cuda-device 0\
@@ -33,8 +33,8 @@ echo "Running NO Graph benchmark"
     --cuda-check-interval 1 \
     --trials 50000 \
     --report-every 50000
-# float
-echo "Running single precision benchmark"
+# graph
+echo "Running Graph benchmark"
 ./jointbp_ets \
     --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt --simulate --p 0.04 --max-iter 200 --seed 106 --no-pp --cuda --cuda-device 0 \
     --cuda-graph \
