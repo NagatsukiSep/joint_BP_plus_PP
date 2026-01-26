@@ -1,7 +1,7 @@
 #!/bin/bash
 #$ -S /bin/bash
 #$ -cwd
-#$ -N sweep_warmup_interval
+#$ -N sweep_0.04
 #$ -l h_rt=02:00:00
 #$ -l gpu_1=1
 #$ -o logs/$JOB_NAME.$JOB_ID.out
@@ -24,8 +24,8 @@ module purge || true
 module load cuda || true
 
 # run experiments
-nvcc -O2 -std=c++17 -DUSE_CUDA -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
-./sweep_warmup_interval.sh --p 0.04 --seed 106 --max-warmup 14 --trials 50000　--no-graph --out data/results_warmup_interval.tsv
+./build.sh
+./sweep_warmup_interval.sh --p 0.04 --seed 106 --max-warmup 14 --trials 50000 --out data/results_warmup_interval_04.tsv
 
 echo "===== JOB END ====="
 date

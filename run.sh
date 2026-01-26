@@ -8,9 +8,10 @@ HIST_FILE=""
 PRE_RUNS=0
 REPORT_EVERY=1000
 REPORT_EVERY_SPECIFIED=0
+EMIT_CUDA_GRAPH=1
 
 usage() {
-  echo "Usage: $0 [--p value] [--check-warmup value] [--interval value] [--trials value] [--pre-runs value] [--report-every value] [--iter-hist-out] [--hist-file path]" >&2
+  echo "Usage: $0 [--p value] [--check-warmup value] [--interval value] [--trials value] [--pre-runs value] [--report-every value] [--iter-hist-out] [--hist-file path] [--no-graph]" >&2
 }
 
 while [ $# -gt 0 ]; do
@@ -52,6 +53,10 @@ while [ $# -gt 0 ]; do
       HIST_FILE="${2:-}"
       shift 2
       ;;
+    --no-graph)
+      EMIT_CUDA_GRAPH=0
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -81,10 +86,12 @@ BASE_CMD=(./jointbp_ets
   --no-pp
   --cuda
   --cuda-device 0
-  --cuda-graph
   --cuda-check-interval "$CUDA_CHECK_INTERVAL"
   --cuda-check-warmup "$CUDA_CHECK_WARMUP"
 )
+if [ "$EMIT_CUDA_GRAPH" -eq 1 ]; then
+  BASE_CMD+=(--cuda-graph)
+fi
 
 if [ "$PRE_RUNS" -gt 0 ]; then
   echo "Pre-run: $PRE_RUNS trials (no-output)"
