@@ -2,7 +2,7 @@
 #$ -S /bin/bash
 #$ -cwd
 #$ -N sweep_warmup_interval
-#$ -l h_rt=02:00:00
+#$ -l h_rt=00:05:00
 #$ -l gpu_1=1
 #$ -o logs/$JOB_NAME.$JOB_ID.out
 #$ -e logs/$JOB_NAME.$JOB_ID.err
@@ -24,8 +24,12 @@ module purge || true
 module load cuda || true
 
 # run experiments
+# double
+nvcc -O2 -std=c++17 -DUSE_CUDA -DUSE_CUDA_FP32 -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
+./run.sh --p 0.04 --trials 50000
+# float
 ./build.sh
-./sweep_warmup_interval.sh --max-warmup 14 --trials 50000 --out data/results_warmup_interval.tsv
+./run.sh --p 0.04 --trials 50000
 
 echo "===== JOB END ====="
 date
