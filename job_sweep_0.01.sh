@@ -2,7 +2,7 @@
 #$ -S /bin/bash
 #$ -cwd
 #$ -N sweep_0.01
-#$ -l h_rt=00:05:00
+#$ -l h_rt=01:00:00
 #$ -l gpu_1=1
 #$ -o logs/$JOB_NAME.$JOB_ID.out
 #$ -e logs/$JOB_NAME.$JOB_ID.err
@@ -25,7 +25,7 @@ module load cuda || true
 
 # run experiments
 ./build.sh
-./sweep_warmup_interval.sh --p 0.01 --seed 3 --max-warmup 4 --trials 50000 --out data/results_warmup_interval_025.tsv
+./sweep_warmup_interval.sh --p 0.01 --seed 3 --max-warmup 4 --trials 50000 --out data/results_warmup_interval_01.tsv
 
 echo "===== JOB END ====="
 date
