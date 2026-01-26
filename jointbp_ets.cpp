@@ -2370,7 +2370,7 @@ static JointBPResult joint_bp_decode(
             abs_llr_x.assign(nvars, 0.0);
             abs_llr_z.assign(nvars, 0.0);
         }
-        if (!freeze_x_active) {
+        auto update_x_checks = [&]() {
             for (int c = 0; c < mX; ++c) {
                 int deg = static_cast<int>(x_checks[c].size());
                 std::vector<double> q0(deg, 0.0), q1(deg, 0.0);
@@ -2407,9 +2407,9 @@ static JointBPResult joint_bp_decode(
                     x_c2v[c][i] = out;
                 }
             }
-        }
+        };
 
-        if (!freeze_z_active) {
+        auto update_z_checks = [&]() {
             for (int c = 0; c < mZ; ++c) {
                 int deg = static_cast<int>(z_checks[c].size());
                 std::vector<double> q0(deg, 0.0), q1(deg, 0.0);
@@ -2446,6 +2446,13 @@ static JointBPResult joint_bp_decode(
                     z_c2v[c][i] = out;
                 }
             }
+        };
+
+        if (!freeze_x_active) {
+            update_x_checks();
+        }
+        if (!freeze_z_active) {
+            update_z_checks();
         }
 
         for (int v = 0; v < nvars; ++v) {

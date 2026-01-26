@@ -762,9 +762,101 @@ bool cuda_bp_decode(
         if (!check_cuda(cudaStreamCreate(&ctx->graph_stream), error_out, "cudaStreamCreate")) return false;
         stream = ctx->graph_stream;
     }
+    const bool use_parallel_xz = !use_graph;
+    cudaStream_t x_stream = stream;
+    cudaStream_t z_stream = stream;
+    cudaEvent_t x_done{};
+    cudaEvent_t z_done{};
+    struct ParallelCleanup {
+        bool enabled = false;
+        cudaStream_t x_stream = 0;
+        cudaStream_t z_stream = 0;
+        cudaEvent_t x_done{};
+        cudaEvent_t z_done{};
+        ~ParallelCleanup() {
+            if (!enabled) return;
+            cudaEventDestroy(x_done);
+            cudaEventDestroy(z_done);
+            cudaStreamDestroy(x_stream);
+            cudaStreamDestroy(z_stream);
+        }
+    } parallel_cleanup;
+    if (use_parallel_xz) {
+        if (!check_cuda(cudaStreamCreate(&x_stream), error_out, "cudaStreamCreate x")) return false;
+        if (!check_cuda(cudaStreamCreate(&z_stream), error_out, "cudaStreamCreate z")) {
+            cudaStreamDestroy(x_stream);
+            return false;
+        }
+        if (!check_cuda(cudaEventCreate(&x_done), error_out, "cudaEventCreate x_done")) {
+            cudaStreamDestroy(x_stream);
+            cudaStreamDestroy(z_stream);
+            return false;
+        }
+        if (!check_cuda(cudaEventCreate(&z_done), error_out, "cudaEventCreate z_done")) {
+            cudaEventDestroy(x_done);
+            cudaStreamDestroy(x_stream);
+            cudaStreamDestroy(z_stream);
+            return false;
+        }
+        parallel_cleanup.enabled = true;
+        parallel_cleanup.x_stream = x_stream;
+        parallel_cleanup.z_stream = z_stream;
+        parallel_cleanup.x_done = x_done;
+        parallel_cleanup.z_done = z_done;
+    }
 
-    auto enqueue_iter_kernels = [&](cudaStream_t stream, bool run_x, bool run_z) {
-        if (run_x) {
+    auto enqueue_iter_kernels = [&](cudaStream_t stream, bool run_x, bool run_z) -> bool {
+        if (use_parallel_xz && run_x && run_z) {
+            if (use_prefix_x) {
+                check_update_x_by_check_kernel<<<ctx->mX, check_x_threads, shared_x_bytes, x_stream>>>(
+                    ctx->mX,
+                    ctx->d_x_check_offsets,
+                    ctx->d_x_check_edges,
+                    ctx->d_sx,
+                    ctx->d_x_v2c,
+                    ctx->d_x_c2v
+                );
+            } else {
+                check_update_x_kernel<<<x_blocks, threads, 0, x_stream>>>(
+                    ctx->x_edges,
+                    ctx->d_x_check_offsets,
+                    ctx->d_x_check_edges,
+                    ctx->d_x_edge_check,
+                    ctx->d_sx,
+                    ctx->d_x_v2c,
+                    ctx->d_x_c2v
+                );
+            }
+            if (use_prefix_z) {
+                check_update_z_by_check_kernel<<<ctx->mZ, check_z_threads, shared_z_bytes, z_stream>>>(
+                    ctx->mZ,
+                    ctx->d_z_check_offsets,
+                    ctx->d_z_check_edges,
+                    ctx->d_sz,
+                    ctx->d_z_v2c,
+                    ctx->d_z_c2v
+                );
+            } else {
+                check_update_z_kernel<<<z_blocks, threads, 0, z_stream>>>(
+                    ctx->z_edges,
+                    ctx->d_z_check_offsets,
+                    ctx->d_z_check_edges,
+                    ctx->d_z_edge_check,
+                    ctx->d_sz,
+                    ctx->d_z_v2c,
+                    ctx->d_z_c2v
+                );
+            }
+            if (!check_cuda(cudaEventRecord(x_done, x_stream), error_out, "cudaEventRecord x_done")) return false;
+            if (!check_cuda(cudaEventRecord(z_done, z_stream), error_out, "cudaEventRecord z_done")) return false;
+            if (!check_cuda(cudaStreamWaitEvent(stream, x_done, 0), error_out, "cudaStreamWaitEvent x_done")) {
+                return false;
+            }
+            if (!check_cuda(cudaStreamWaitEvent(stream, z_done, 0), error_out, "cudaStreamWaitEvent z_done")) {
+                return false;
+            }
+        } else {
+            if (run_x) {
             if (use_prefix_x) {
                 check_update_x_by_check_kernel<<<ctx->mX, check_x_threads, shared_x_bytes, stream>>>(
                     ctx->mX,
@@ -785,27 +877,28 @@ bool cuda_bp_decode(
                     ctx->d_x_c2v
                 );
             }
-        }
-        if (run_z) {
-            if (use_prefix_z) {
-                check_update_z_by_check_kernel<<<ctx->mZ, check_z_threads, shared_z_bytes, stream>>>(
-                    ctx->mZ,
-                    ctx->d_z_check_offsets,
-                    ctx->d_z_check_edges,
-                    ctx->d_sz,
-                    ctx->d_z_v2c,
-                    ctx->d_z_c2v
-                );
-            } else {
-                check_update_z_kernel<<<z_blocks, threads, 0, stream>>>(
-                    ctx->z_edges,
-                    ctx->d_z_check_offsets,
-                    ctx->d_z_check_edges,
-                    ctx->d_z_edge_check,
-                    ctx->d_sz,
-                    ctx->d_z_v2c,
-                    ctx->d_z_c2v
-                );
+            }
+            if (run_z) {
+                if (use_prefix_z) {
+                    check_update_z_by_check_kernel<<<ctx->mZ, check_z_threads, shared_z_bytes, stream>>>(
+                        ctx->mZ,
+                        ctx->d_z_check_offsets,
+                        ctx->d_z_check_edges,
+                        ctx->d_sz,
+                        ctx->d_z_v2c,
+                        ctx->d_z_c2v
+                    );
+                } else {
+                    check_update_z_kernel<<<z_blocks, threads, 0, stream>>>(
+                        ctx->z_edges,
+                        ctx->d_z_check_offsets,
+                        ctx->d_z_check_edges,
+                        ctx->d_z_edge_check,
+                        ctx->d_sz,
+                        ctx->d_z_v2c,
+                        ctx->d_z_c2v
+                    );
+                }
             }
         }
         variable_update_kernel<<<var_blocks, threads, 0, stream>>>(
@@ -826,6 +919,7 @@ bool cuda_bp_decode(
             nullptr,
             nullptr
         );
+        return true;
     };
 
     auto enqueue_check_kernels = [&](cudaStream_t stream, std::string *err_out) -> bool {
@@ -895,7 +989,7 @@ bool cuda_bp_decode(
                             "cudaStreamBeginCapture iter")) {
                 return false;
             }
-            enqueue_iter_kernels(stream, true, true);
+            if (!enqueue_iter_kernels(stream, true, true)) return false;
             if (!check_cuda(cudaStreamEndCapture(stream, &ctx->iter_graph), error_out, "cudaStreamEndCapture iter")) {
                 return false;
             }
@@ -908,7 +1002,7 @@ bool cuda_bp_decode(
                             "cudaStreamBeginCapture check")) {
                 return false;
             }
-            enqueue_iter_kernels(stream, true, true);
+            if (!enqueue_iter_kernels(stream, true, true)) return false;
             if (!enqueue_check_kernels(stream, error_out)) return false;
             if (!check_cuda(cudaStreamEndCapture(stream, &ctx->check_graph), error_out, "cudaStreamEndCapture check")) {
                 return false;
@@ -984,7 +1078,7 @@ bool cuda_bp_decode(
                 return false;
             }
         } else {
-            enqueue_iter_kernels(stream, !freeze_x, !freeze_z);
+            if (!enqueue_iter_kernels(stream, !freeze_x, !freeze_z)) return false;
             if (!check_cuda(cudaGetLastError(), error_out, "bp_kernels")) return false;
             if (do_check) {
                 if (record_costs) {
