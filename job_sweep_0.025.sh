@@ -2,7 +2,7 @@
 #$ -S /bin/bash
 #$ -cwd
 #$ -N sweep_0.025
-#$ -l h_rt=00:05:00
+#$ -l h_rt=01:00:00
 #$ -l gpu_1=1
 #$ -o logs/$JOB_NAME.$JOB_ID.out
 #$ -e logs/$JOB_NAME.$JOB_ID.err
