@@ -25,11 +25,23 @@ module load cuda || true
 
 # run experiments
 # double
+echo "Running double precision benchmark"
 nvcc -O2 -std=c++17 -DUSE_CUDA -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
-./run.sh --p 0.04 --trials 50000 --report-every 50000 --check-warmup 0 --check-interval 1
+./jointbp_ets \
+    --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt --simulate --p 0.04 --max-iter 200 --no-pp --cuda --cuda-device 0 \
+    --cuda-check-warmup 0 \
+    --cuda-check-interval 1 \
+    --trials 50000 \
+    --report-every 50000
 # float
+echo "Running single precision benchmark"
 ./build.sh
-./run.sh --p 0.04 --trials 50000 --report-every 50000 --check-warmup 0 --check-interval 1
+./jointbp_ets \
+    --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt --simulate --p 0.04 --max-iter 200 --no-pp --cuda --cuda-device 0 \
+    --cuda-check-warmup 0 \
+    --cuda-check-interval 1 \
+    --trials 50000 \
+    --report-every 50000
 
 echo "===== JOB END ====="
 date
