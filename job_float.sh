@@ -25,11 +25,11 @@ module load cuda || true
 
 # run experiments
 # double
-nvcc -O2 -std=c++17 -DUSE_CUDA -DUSE_CUDA_FP32 -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
-./run.sh --p 0.04 --trials 50000
+nvcc -O2 -std=c++17 -DUSE_CUDA -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
+./run.sh --p 0.04 --trials 50000 --report-every 50000 --check-warmup 0 --check-interval 1
 # float
 ./build.sh
-./run.sh --p 0.04 --trials 50000
+./run.sh --p 0.04 --trials 50000 --report-every 50000 --check-warmup 0 --check-interval 1
 
 echo "===== JOB END ====="
 date
