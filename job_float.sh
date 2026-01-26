@@ -1,7 +1,7 @@
 #!/bin/bash
 #$ -S /bin/bash
 #$ -cwd
-#$ -N sweep_warmup_interval
+#$ -N float_vs_double
 #$ -l h_rt=00:05:00
 #$ -l gpu_1=1
 #$ -o logs/$JOB_NAME.$JOB_ID.out
