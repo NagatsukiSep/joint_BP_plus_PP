@@ -25,8 +25,7 @@ module load cuda || true
 
 # run experiments
 ./build.sh
-./sweep_warmup_interval.sh --p 0.025 --seed 3 --max-warmup 8 --trials 50000 --out data/results_warmup_interval\0.0
-25.tsv
+./sweep_warmup_interval.sh --p 0.025 --seed 3 --max-warmup 8 --trials 50000 --out data/results_warmup_interval_025.tsv
 
 echo "===== JOB END ====="
 date
