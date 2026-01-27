@@ -94,18 +94,27 @@ __global__ void init_messages_kernel(int edges, DeviceMsg *v2c, DeviceMsg *c2v, 
                         static_cast<MsgReal>(0.25));
 }
 
-__global__ void check_update_x_kernel(
+__global__ void check_update_kernel(
     int edges,
     const int *check_offsets,
     const int *check_edges,
     const int *edge_check,
+    int mX,
     const int *sx,
+    const int *sz,
     const DeviceMsg *v2c,
-    DeviceMsg *c2v
+    DeviceMsg *c2v,
+    const int *freeze_x_flag,
+    const int *freeze_z_flag
 ) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= edges) return;
     int c = edge_check[e];
+    bool is_x = (c < mX);
+    int freeze_x = freeze_x_flag ? *freeze_x_flag : 0;
+    int freeze_z = freeze_z_flag ? *freeze_z_flag : 0;
+    if (is_x && freeze_x) return;
+    if (!is_x && freeze_z) return;
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     MsgReal p_even = static_cast<MsgReal>(1.0);
@@ -114,30 +123,40 @@ __global__ void check_update_x_kernel(
         int ej = check_edges[idx];
         if (ej == e) continue;
         DeviceMsg m = v2c[ej];
-        MsgReal q0 = m.v0 + m.v2;
-        MsgReal q1 = m.v1 + m.v3;
+        MsgReal q0 = is_x ? (m.v0 + m.v2) : (m.v0 + m.v1);
+        MsgReal q1 = is_x ? (m.v1 + m.v3) : (m.v2 + m.v3);
         MsgReal new_even = p_even * q0 + p_odd * q1;
         MsgReal new_odd = p_even * q1 + p_odd * q0;
         p_even = new_even;
         p_odd = new_odd;
     }
-    MsgReal val0 = (sx[c] == 0) ? p_even : p_odd;
-    MsgReal val1 = (sx[c] == 0) ? p_odd : p_even;
-    DeviceMsg out = make_msg(val0, val1, val0, val1);
+    int syn = is_x ? sx[c] : sz[c - mX];
+    MsgReal val0 = (syn == 0) ? p_even : p_odd;
+    MsgReal val1 = (syn == 0) ? p_odd : p_even;
+    DeviceMsg out = is_x ? make_msg(val0, val1, val0, val1) : make_msg(val0, val0, val1, val1);
     normalize_msg(out);
     c2v[e] = out;
 }
 
-__global__ void check_update_x_by_check_kernel(
+__global__ void check_update_by_check_kernel(
     int checks,
     const int *check_offsets,
     const int *check_edges,
+    int mX,
     const int *sx,
+    const int *sz,
     const DeviceMsg *v2c,
-    DeviceMsg *c2v
+    DeviceMsg *c2v,
+    const int *freeze_x_flag,
+    const int *freeze_z_flag
 ) {
     int c = blockIdx.x;
     if (c >= checks) return;
+    bool is_x = (c < mX);
+    int freeze_x = freeze_x_flag ? *freeze_x_flag : 0;
+    int freeze_z = freeze_z_flag ? *freeze_z_flag : 0;
+    if (is_x && freeze_x) return;
+    if (!is_x && freeze_z) return;
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int deg = end - start;
@@ -153,8 +172,8 @@ __global__ void check_update_x_by_check_kernel(
 
     int edge_idx = check_edges[start + tid];
     DeviceMsg m = v2c[edge_idx];
-    q0[tid] = m.v0 + m.v2;
-    q1[tid] = m.v1 + m.v3;
+    q0[tid] = is_x ? (m.v0 + m.v2) : (m.v0 + m.v1);
+    q1[tid] = is_x ? (m.v1 + m.v3) : (m.v2 + m.v3);
     __syncthreads();
 
     pref_even[tid] = q0[tid];
@@ -207,143 +226,22 @@ __global__ void check_update_x_by_check_kernel(
 
     MsgReal p_even = pref_ex_even * suff_ex_even + pref_ex_odd * suff_ex_odd;
     MsgReal p_odd = pref_ex_even * suff_ex_odd + pref_ex_odd * suff_ex_even;
-    MsgReal val0 = (sx[c] == 0) ? p_even : p_odd;
-    MsgReal val1 = (sx[c] == 0) ? p_odd : p_even;
-    DeviceMsg out = make_msg(val0, val1, val0, val1);
-    normalize_msg(out);
-    c2v[edge_idx] = out;
-}
-
-__global__ void check_update_z_kernel(
-    int edges,
-    const int *check_offsets,
-    const int *check_edges,
-    const int *edge_check,
-    const int *sz,
-    const DeviceMsg *v2c,
-    DeviceMsg *c2v
-) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= edges) return;
-    int c = edge_check[e];
-    int start = check_offsets[c];
-    int end = check_offsets[c + 1];
-    MsgReal p_even = static_cast<MsgReal>(1.0);
-    MsgReal p_odd = static_cast<MsgReal>(0.0);
-    for (int idx = start; idx < end; ++idx) {
-        int ej = check_edges[idx];
-        if (ej == e) continue;
-        DeviceMsg m = v2c[ej];
-        MsgReal q0 = m.v0 + m.v1;
-        MsgReal q1 = m.v2 + m.v3;
-        MsgReal new_even = p_even * q0 + p_odd * q1;
-        MsgReal new_odd = p_even * q1 + p_odd * q0;
-        p_even = new_even;
-        p_odd = new_odd;
-    }
-    MsgReal val0 = (sz[c] == 0) ? p_even : p_odd;
-    MsgReal val1 = (sz[c] == 0) ? p_odd : p_even;
-    DeviceMsg out = make_msg(val0, val0, val1, val1);
-    normalize_msg(out);
-    c2v[e] = out;
-}
-
-__global__ void check_update_z_by_check_kernel(
-    int checks,
-    const int *check_offsets,
-    const int *check_edges,
-    const int *sz,
-    const DeviceMsg *v2c,
-    DeviceMsg *c2v
-) {
-    int c = blockIdx.x;
-    if (c >= checks) return;
-    int start = check_offsets[c];
-    int end = check_offsets[c + 1];
-    int deg = end - start;
-    int tid = threadIdx.x;
-    if (tid >= deg) return;
-    extern __shared__ MsgReal shared[];
-    MsgReal *q0 = shared;
-    MsgReal *q1 = q0 + deg;
-    MsgReal *pref_even = q1 + deg;
-    MsgReal *pref_odd = pref_even + deg;
-    MsgReal *suff_even = pref_odd + deg;
-    MsgReal *suff_odd = suff_even + deg;
-
-    int edge_idx = check_edges[start + tid];
-    DeviceMsg m = v2c[edge_idx];
-    q0[tid] = m.v0 + m.v1;
-    q1[tid] = m.v2 + m.v3;
-    __syncthreads();
-
-    pref_even[tid] = q0[tid];
-    pref_odd[tid] = q1[tid];
-    __syncthreads();
-    for (int offset = 1; offset < deg; offset <<= 1) {
-        if (tid >= offset) {
-            MsgReal a_even = pref_even[tid - offset];
-            MsgReal a_odd = pref_odd[tid - offset];
-            MsgReal b_even = pref_even[tid];
-            MsgReal b_odd = pref_odd[tid];
-            suff_even[tid] = a_even * b_even + a_odd * b_odd;
-            suff_odd[tid] = a_even * b_odd + a_odd * b_even;
-        } else {
-            suff_even[tid] = pref_even[tid];
-            suff_odd[tid] = pref_odd[tid];
-        }
-        __syncthreads();
-        pref_even[tid] = suff_even[tid];
-        pref_odd[tid] = suff_odd[tid];
-        __syncthreads();
-    }
-
-    MsgReal pref_ex_even = (tid == 0) ? static_cast<MsgReal>(1.0) : pref_even[tid - 1];
-    MsgReal pref_ex_odd = (tid == 0) ? static_cast<MsgReal>(0.0) : pref_odd[tid - 1];
-
-    suff_even[tid] = q0[tid];
-    suff_odd[tid] = q1[tid];
-    __syncthreads();
-    for (int offset = 1; offset < deg; offset <<= 1) {
-        if (tid + offset < deg) {
-            MsgReal a_even = suff_even[tid];
-            MsgReal a_odd = suff_odd[tid];
-            MsgReal b_even = suff_even[tid + offset];
-            MsgReal b_odd = suff_odd[tid + offset];
-            q0[tid] = a_even * b_even + a_odd * b_odd;
-            q1[tid] = a_even * b_odd + a_odd * b_even;
-        } else {
-            q0[tid] = suff_even[tid];
-            q1[tid] = suff_odd[tid];
-        }
-        __syncthreads();
-        suff_even[tid] = q0[tid];
-        suff_odd[tid] = q1[tid];
-        __syncthreads();
-    }
-
-    MsgReal suff_ex_even = (tid == deg - 1) ? static_cast<MsgReal>(1.0) : suff_even[tid + 1];
-    MsgReal suff_ex_odd = (tid == deg - 1) ? static_cast<MsgReal>(0.0) : suff_odd[tid + 1];
-
-    MsgReal p_even = pref_ex_even * suff_ex_even + pref_ex_odd * suff_ex_odd;
-    MsgReal p_odd = pref_ex_even * suff_ex_odd + pref_ex_odd * suff_ex_even;
-    MsgReal val0 = (sz[c] == 0) ? p_even : p_odd;
-    MsgReal val1 = (sz[c] == 0) ? p_odd : p_even;
-    DeviceMsg out = make_msg(val0, val0, val1, val1);
+    int syn = is_x ? sx[c] : sz[c - mX];
+    MsgReal val0 = (syn == 0) ? p_even : p_odd;
+    MsgReal val1 = (syn == 0) ? p_odd : p_even;
+    DeviceMsg out = is_x ? make_msg(val0, val1, val0, val1) : make_msg(val0, val0, val1, val1);
     normalize_msg(out);
     c2v[edge_idx] = out;
 }
 
 __global__ void variable_update_kernel(
     int nvars,
-    const int *x_var_offsets,
-    const int *x_var_edges,
-    const int *z_var_offsets,
-    const int *z_var_edges,
-    const DeviceMsg *x_c2v,
-    const DeviceMsg *z_c2v,
-    DeviceMsg *x_v2c,
-    DeviceMsg *z_v2c,
+    const int *var_offsets,
+    const int *var_edges,
+    const int *edge_check,
+    int mX,
+    const DeviceMsg *c2v,
+    DeviceMsg *v2c,
     DeviceMsg prior,
     double damping,
     const int *freeze_x_flag,
@@ -357,15 +255,10 @@ __global__ void variable_update_kernel(
     int freeze_x = freeze_x_flag ? *freeze_x_flag : 0;
     int freeze_z = freeze_z_flag ? *freeze_z_flag : 0;
     DeviceMsg total = prior;
-    int x_start = x_var_offsets[v];
-    int x_end = x_var_offsets[v + 1];
-    int z_start = z_var_offsets[v];
-    int z_end = z_var_offsets[v + 1];
-    for (int idx = x_start; idx < x_end; ++idx) {
-        total = multiply_msg(total, x_c2v[x_var_edges[idx]]);
-    }
-    for (int idx = z_start; idx < z_end; ++idx) {
-        total = multiply_msg(total, z_c2v[z_var_edges[idx]]);
+    int start = var_offsets[v];
+    int end = var_offsets[v + 1];
+    for (int idx = start; idx < end; ++idx) {
+        total = multiply_msg(total, c2v[var_edges[idx]]);
     }
     normalize_msg(total);
     int best = 0;
@@ -393,43 +286,26 @@ __global__ void variable_update_kernel(
         abs_llr_x[v] = fabs(llr_x);
         abs_llr_z[v] = fabs(llr_z);
     }
-    if (!freeze_x) {
-        const bool use_damping = damping > 0.0;
-        const MsgReal keep = use_damping ? static_cast<MsgReal>(1.0 - damping) : static_cast<MsgReal>(1.0);
-        const MsgReal damp = use_damping ? static_cast<MsgReal>(damping) : static_cast<MsgReal>(0.0);
-        for (int idx = x_start; idx < x_end; ++idx) {
-            int e = x_var_edges[idx];
-            DeviceMsg out = divide_msg(total, x_c2v[e]);
+    const bool use_damping = damping > 0.0;
+    const MsgReal keep = use_damping ? static_cast<MsgReal>(1.0 - damping) : static_cast<MsgReal>(1.0);
+    const MsgReal damp = use_damping ? static_cast<MsgReal>(damping) : static_cast<MsgReal>(0.0);
+    for (int idx = start; idx < end; ++idx) {
+        int e = var_edges[idx];
+        int c = edge_check[e];
+        bool is_x = (c < mX);
+        if (is_x && freeze_x) continue;
+        if (!is_x && freeze_z) continue;
+        DeviceMsg out = divide_msg(total, c2v[e]);
+        normalize_msg(out);
+        if (use_damping) {
+            DeviceMsg old = v2c[e];
+            out.v0 = keep * out.v0 + damp * old.v0;
+            out.v1 = keep * out.v1 + damp * old.v1;
+            out.v2 = keep * out.v2 + damp * old.v2;
+            out.v3 = keep * out.v3 + damp * old.v3;
             normalize_msg(out);
-            if (use_damping) {
-                DeviceMsg old = x_v2c[e];
-                out.v0 = keep * out.v0 + damp * old.v0;
-                out.v1 = keep * out.v1 + damp * old.v1;
-                out.v2 = keep * out.v2 + damp * old.v2;
-                out.v3 = keep * out.v3 + damp * old.v3;
-                normalize_msg(out);
-            }
-            x_v2c[e] = out;
         }
-    }
-    if (!freeze_z) {
-        const bool use_damping = damping > 0.0;
-        const MsgReal keep = use_damping ? static_cast<MsgReal>(1.0 - damping) : static_cast<MsgReal>(1.0);
-        const MsgReal damp = use_damping ? static_cast<MsgReal>(damping) : static_cast<MsgReal>(0.0);
-        for (int idx = z_start; idx < z_end; ++idx) {
-            int e = z_var_edges[idx];
-            DeviceMsg out = divide_msg(total, z_c2v[e]);
-            normalize_msg(out);
-            if (use_damping) {
-                DeviceMsg old = z_v2c[e];
-                out.v0 = keep * out.v0 + damp * old.v0;
-                out.v1 = keep * out.v1 + damp * old.v1;
-                out.v2 = keep * out.v2 + damp * old.v2;
-                out.v3 = keep * out.v3 + damp * old.v3;
-                normalize_msg(out);
-            }
-            z_v2c[e] = out;
-        }
+        v2c[e] = out;
     }
 }
 
@@ -439,20 +315,28 @@ __global__ void syndrome_kernel(
     const int *check_edges,
     const int *edge_var,
     const int *est,
-    int use_xbit,
-    int *syndrome
+    int mX,
+    const int *sx,
+    const int *sz,
+    int *syndrome_x,
+    int *syndrome_z
 ) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= checks) return;
+    bool is_x = (c < mX);
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int parity = 0;
     for (int idx = start; idx < end; ++idx) {
         int v = edge_var[check_edges[idx]];
-        int bit = use_xbit ? xbit(est[v]) : zbit(est[v]);
+        int bit = is_x ? xbit(est[v]) : zbit(est[v]);
         parity ^= bit;
     }
-    syndrome[c] = parity;
+    if (is_x) {
+        syndrome_x[c] = parity;
+    } else {
+        syndrome_z[c - mX] = parity;
+    }
 }
 
 __global__ void syndrome_compare_kernel(
@@ -461,22 +345,31 @@ __global__ void syndrome_compare_kernel(
     const int *check_edges,
     const int *edge_var,
     const int *est,
-    const int *syndrome,
-    int use_xbit,
-    int *syn_all
+    int mX,
+    const int *sx,
+    const int *sz,
+    int *syn_x,
+    int *syn_z
 ) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= checks) return;
+    bool is_x = (c < mX);
     int start = check_offsets[c];
     int end = check_offsets[c + 1];
     int parity = 0;
     for (int idx = start; idx < end; ++idx) {
         int v = edge_var[check_edges[idx]];
-        int bit = use_xbit ? xbit(est[v]) : zbit(est[v]);
+        int bit = is_x ? xbit(est[v]) : zbit(est[v]);
         parity ^= bit;
     }
-    if (parity != syndrome[c]) {
-        atomicAnd(syn_all, 0);
+    if (is_x) {
+        if (parity != sx[c]) {
+            atomicAnd(syn_x, 0);
+        }
+    } else {
+        if (parity != sz[c - mX]) {
+            atomicAnd(syn_z, 0);
+        }
     }
 }
 
@@ -499,6 +392,8 @@ __global__ void compare_syndrome_kernel(int n, const int *a, const int *b, int *
 __global__ void freeze_msgs_kernel(
     int edges,
     const int *edge_var,
+    const int *edge_check,
+    int mX,
     const int *est,
     int use_xbit,
     DeviceMsg *v2c,
@@ -506,6 +401,9 @@ __global__ void freeze_msgs_kernel(
 ) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= edges) return;
+    bool is_x = (edge_check[e] < mX);
+    if (use_xbit && !is_x) return;
+    if (!use_xbit && is_x) return;
     int v = edge_var[e];
     int bit = use_xbit ? xbit(est[v]) : zbit(est[v]);
     DeviceMsg msg = use_xbit ? det_msg_xbit(bit) : det_msg_zbit(bit);
@@ -519,10 +417,9 @@ struct CudaBPContext {
     int nvars = 0;
     int mX = 0;
     int mZ = 0;
-    int x_edges = 0;
-    int z_edges = 0;
-    int max_x_deg = 0;
-    int max_z_deg = 0;
+    int mAll = 0;
+    int edges = 0;
+    int max_deg = 0;
     cudaStream_t graph_stream = nullptr;
     cudaGraph_t iter_graph = nullptr;
     cudaGraphExec_t iter_exec = nullptr;
@@ -531,18 +428,12 @@ struct CudaBPContext {
     bool graph_ready = false;
     CudaMsg graph_prior{{0.0, 0.0, 0.0, 0.0}};
     double graph_damping = 0.0;
-    int *d_x_check_offsets = nullptr;
-    int *d_x_check_edges = nullptr;
-    int *d_x_edge_var = nullptr;
-    int *d_x_edge_check = nullptr;
-    int *d_x_var_offsets = nullptr;
-    int *d_x_var_edges = nullptr;
-    int *d_z_check_offsets = nullptr;
-    int *d_z_check_edges = nullptr;
-    int *d_z_edge_var = nullptr;
-    int *d_z_edge_check = nullptr;
-    int *d_z_var_offsets = nullptr;
-    int *d_z_var_edges = nullptr;
+    int *d_check_offsets = nullptr;
+    int *d_check_edges = nullptr;
+    int *d_edge_var = nullptr;
+    int *d_edge_check = nullptr;
+    int *d_var_offsets = nullptr;
+    int *d_var_edges = nullptr;
     int *d_sx = nullptr;
     int *d_sz = nullptr;
     int *d_sx_hat = nullptr;
@@ -554,10 +445,8 @@ struct CudaBPContext {
     int *d_syn_z = nullptr;
     int *d_freeze_x = nullptr;
     int *d_freeze_z = nullptr;
-    DeviceMsg *d_x_v2c = nullptr;
-    DeviceMsg *d_x_c2v = nullptr;
-    DeviceMsg *d_z_v2c = nullptr;
-    DeviceMsg *d_z_c2v = nullptr;
+    DeviceMsg *d_v2c = nullptr;
+    DeviceMsg *d_c2v = nullptr;
 };
 
 namespace {
@@ -594,32 +483,72 @@ CudaBPContext *cuda_bp_create(const CudaBPGraph &graph, int device_id, std::stri
     ctx->nvars = graph.nvars;
     ctx->mX = graph.mX;
     ctx->mZ = graph.mZ;
-    ctx->x_edges = graph.x_edges;
-    ctx->z_edges = graph.z_edges;
-    ctx->max_x_deg = 0;
+    ctx->mAll = graph.mX + graph.mZ;
+    ctx->edges = graph.x_edges + graph.z_edges;
+    ctx->max_deg = 0;
     for (int c = 0; c < graph.mX; ++c) {
         int deg = graph.x_check_offsets[c + 1] - graph.x_check_offsets[c];
-        if (deg > ctx->max_x_deg) ctx->max_x_deg = deg;
+        if (deg > ctx->max_deg) ctx->max_deg = deg;
     }
-    ctx->max_z_deg = 0;
     for (int c = 0; c < graph.mZ; ++c) {
         int deg = graph.z_check_offsets[c + 1] - graph.z_check_offsets[c];
-        if (deg > ctx->max_z_deg) ctx->max_z_deg = deg;
+        if (deg > ctx->max_deg) ctx->max_deg = deg;
     }
 
-    if (!copy_int_array(graph.x_check_offsets, &ctx->d_x_check_offsets, error_out, "x_check_offsets")) return nullptr;
-    if (!copy_int_array(graph.x_check_edges, &ctx->d_x_check_edges, error_out, "x_check_edges")) return nullptr;
-    if (!copy_int_array(graph.x_edge_var, &ctx->d_x_edge_var, error_out, "x_edge_var")) return nullptr;
-    if (!copy_int_array(graph.x_edge_check, &ctx->d_x_edge_check, error_out, "x_edge_check")) return nullptr;
-    if (!copy_int_array(graph.x_var_offsets, &ctx->d_x_var_offsets, error_out, "x_var_offsets")) return nullptr;
-    if (!copy_int_array(graph.x_var_edges, &ctx->d_x_var_edges, error_out, "x_var_edges")) return nullptr;
+    std::vector<int> check_offsets(ctx->mAll + 1, 0);
+    for (int c = 0; c <= graph.mX; ++c) {
+        check_offsets[c] = graph.x_check_offsets[c];
+    }
+    for (int c = 0; c <= graph.mZ; ++c) {
+        check_offsets[graph.mX + c] = graph.x_edges + graph.z_check_offsets[c];
+    }
 
-    if (!copy_int_array(graph.z_check_offsets, &ctx->d_z_check_offsets, error_out, "z_check_offsets")) return nullptr;
-    if (!copy_int_array(graph.z_check_edges, &ctx->d_z_check_edges, error_out, "z_check_edges")) return nullptr;
-    if (!copy_int_array(graph.z_edge_var, &ctx->d_z_edge_var, error_out, "z_edge_var")) return nullptr;
-    if (!copy_int_array(graph.z_edge_check, &ctx->d_z_edge_check, error_out, "z_edge_check")) return nullptr;
-    if (!copy_int_array(graph.z_var_offsets, &ctx->d_z_var_offsets, error_out, "z_var_offsets")) return nullptr;
-    if (!copy_int_array(graph.z_var_edges, &ctx->d_z_var_edges, error_out, "z_var_edges")) return nullptr;
+    std::vector<int> check_edges;
+    check_edges.reserve(static_cast<size_t>(ctx->edges));
+    check_edges.insert(check_edges.end(), graph.x_check_edges.begin(), graph.x_check_edges.end());
+    for (int e : graph.z_check_edges) {
+        check_edges.push_back(graph.x_edges + e);
+    }
+
+    std::vector<int> edge_var(ctx->edges, 0);
+    std::vector<int> edge_check(ctx->edges, 0);
+    for (int e = 0; e < graph.x_edges; ++e) {
+        edge_var[e] = graph.x_edge_var[e];
+        edge_check[e] = graph.x_edge_check[e];
+    }
+    for (int e = 0; e < graph.z_edges; ++e) {
+        int ee = graph.x_edges + e;
+        edge_var[ee] = graph.z_edge_var[e];
+        edge_check[ee] = graph.mX + graph.z_edge_check[e];
+    }
+
+    std::vector<int> var_offsets(ctx->nvars + 1, 0);
+    for (int v = 0; v < ctx->nvars; ++v) {
+        int x_deg = graph.x_var_offsets[v + 1] - graph.x_var_offsets[v];
+        int z_deg = graph.z_var_offsets[v + 1] - graph.z_var_offsets[v];
+        var_offsets[v + 1] = var_offsets[v] + x_deg + z_deg;
+    }
+    std::vector<int> var_edges(static_cast<size_t>(var_offsets.back()), 0);
+    for (int v = 0; v < ctx->nvars; ++v) {
+        int idx = var_offsets[v];
+        int x_start = graph.x_var_offsets[v];
+        int x_end = graph.x_var_offsets[v + 1];
+        for (int i = x_start; i < x_end; ++i) {
+            var_edges[idx++] = graph.x_var_edges[i];
+        }
+        int z_start = graph.z_var_offsets[v];
+        int z_end = graph.z_var_offsets[v + 1];
+        for (int i = z_start; i < z_end; ++i) {
+            var_edges[idx++] = graph.x_edges + graph.z_var_edges[i];
+        }
+    }
+
+    if (!copy_int_array(check_offsets, &ctx->d_check_offsets, error_out, "check_offsets")) return nullptr;
+    if (!copy_int_array(check_edges, &ctx->d_check_edges, error_out, "check_edges")) return nullptr;
+    if (!copy_int_array(edge_var, &ctx->d_edge_var, error_out, "edge_var")) return nullptr;
+    if (!copy_int_array(edge_check, &ctx->d_edge_check, error_out, "edge_check")) return nullptr;
+    if (!copy_int_array(var_offsets, &ctx->d_var_offsets, error_out, "var_offsets")) return nullptr;
+    if (!copy_int_array(var_edges, &ctx->d_var_edges, error_out, "var_edges")) return nullptr;
 
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_sx), sizeof(int) * graph.mX), error_out, "sx")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_sz), sizeof(int) * graph.mZ), error_out, "sz")) return nullptr;
@@ -633,10 +562,8 @@ CudaBPContext *cuda_bp_create(const CudaBPGraph &graph, int device_id, std::stri
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_freeze_x), sizeof(int)), error_out, "freeze_x")) return nullptr;
     if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_freeze_z), sizeof(int)), error_out, "freeze_z")) return nullptr;
 
-    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_x_v2c), sizeof(DeviceMsg) * graph.x_edges), error_out, "x_v2c")) return nullptr;
-    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_x_c2v), sizeof(DeviceMsg) * graph.x_edges), error_out, "x_c2v")) return nullptr;
-    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_z_v2c), sizeof(DeviceMsg) * graph.z_edges), error_out, "z_v2c")) return nullptr;
-    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_z_c2v), sizeof(DeviceMsg) * graph.z_edges), error_out, "z_c2v")) return nullptr;
+    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_v2c), sizeof(DeviceMsg) * ctx->edges), error_out, "v2c")) return nullptr;
+    if (!check_cuda(cudaMalloc(reinterpret_cast<void **>(&ctx->d_c2v), sizeof(DeviceMsg) * ctx->edges), error_out, "c2v")) return nullptr;
 
     return ctx;
 }
@@ -648,18 +575,12 @@ void cuda_bp_destroy(CudaBPContext *ctx) {
     if (ctx->iter_graph) cudaGraphDestroy(ctx->iter_graph);
     if (ctx->check_graph) cudaGraphDestroy(ctx->check_graph);
     if (ctx->graph_stream) cudaStreamDestroy(ctx->graph_stream);
-    cudaFree(ctx->d_x_check_offsets);
-    cudaFree(ctx->d_x_check_edges);
-    cudaFree(ctx->d_x_edge_var);
-    cudaFree(ctx->d_x_edge_check);
-    cudaFree(ctx->d_x_var_offsets);
-    cudaFree(ctx->d_x_var_edges);
-    cudaFree(ctx->d_z_check_offsets);
-    cudaFree(ctx->d_z_check_edges);
-    cudaFree(ctx->d_z_edge_var);
-    cudaFree(ctx->d_z_edge_check);
-    cudaFree(ctx->d_z_var_offsets);
-    cudaFree(ctx->d_z_var_edges);
+    cudaFree(ctx->d_check_offsets);
+    cudaFree(ctx->d_check_edges);
+    cudaFree(ctx->d_edge_var);
+    cudaFree(ctx->d_edge_check);
+    cudaFree(ctx->d_var_offsets);
+    cudaFree(ctx->d_var_edges);
     cudaFree(ctx->d_sx);
     cudaFree(ctx->d_sz);
     cudaFree(ctx->d_sx_hat);
@@ -671,10 +592,8 @@ void cuda_bp_destroy(CudaBPContext *ctx) {
     cudaFree(ctx->d_syn_z);
     cudaFree(ctx->d_freeze_x);
     cudaFree(ctx->d_freeze_z);
-    cudaFree(ctx->d_x_v2c);
-    cudaFree(ctx->d_x_c2v);
-    cudaFree(ctx->d_z_v2c);
-    cudaFree(ctx->d_z_c2v);
+    cudaFree(ctx->d_v2c);
+    cudaFree(ctx->d_c2v);
     delete ctx;
 }
 
@@ -735,26 +654,17 @@ bool cuda_bp_decode(
                                  static_cast<MsgReal>(prior.v[2]),
                                  static_cast<MsgReal>(prior.v[3]));
     int threads = 256;
-    int x_blocks = (ctx->x_edges + threads - 1) / threads;
-    int z_blocks = (ctx->z_edges + threads - 1) / threads;
+    int edge_blocks = (ctx->edges + threads - 1) / threads;
     int var_blocks = (ctx->nvars + threads - 1) / threads;
-    int check_x_blocks = (ctx->mX + threads - 1) / threads;
-    int check_z_blocks = (ctx->mZ + threads - 1) / threads;
-    int check_x_threads = ctx->max_x_deg > 0 ? ctx->max_x_deg : 1;
-    int check_z_threads = ctx->max_z_deg > 0 ? ctx->max_z_deg : 1;
+    int check_blocks = (ctx->mAll + threads - 1) / threads;
+    int check_threads = ctx->max_deg > 0 ? ctx->max_deg : 1;
     const int prefix_threshold = 32;
-    bool use_prefix_x = ctx->max_x_deg >= prefix_threshold;
-    bool use_prefix_z = ctx->max_z_deg >= prefix_threshold;
-    if (check_x_threads > 256) {
-        check_x_threads = 256;
-        use_prefix_x = false;
+    bool use_prefix = ctx->max_deg >= prefix_threshold;
+    if (check_threads > 256) {
+        check_threads = 256;
+        use_prefix = false;
     }
-    if (check_z_threads > 256) {
-        check_z_threads = 256;
-        use_prefix_z = false;
-    }
-    size_t shared_x_bytes = use_prefix_x ? static_cast<size_t>(ctx->max_x_deg) * 6 * sizeof(MsgReal) : 0;
-    size_t shared_z_bytes = use_prefix_z ? static_cast<size_t>(ctx->max_z_deg) * 6 * sizeof(MsgReal) : 0;
+    size_t shared_bytes = use_prefix ? static_cast<size_t>(ctx->max_deg) * 6 * sizeof(MsgReal) : 0;
 
     const bool record_costs = measure_costs && !use_graph;
     cudaStream_t stream = use_graph ? ctx->graph_stream : 0;
@@ -763,61 +673,43 @@ bool cuda_bp_decode(
         stream = ctx->graph_stream;
     }
 
-    auto enqueue_iter_kernels = [&](cudaStream_t stream, bool run_x, bool run_z) {
-        if (run_x) {
-            if (use_prefix_x) {
-                check_update_x_by_check_kernel<<<ctx->mX, check_x_threads, shared_x_bytes, stream>>>(
-                    ctx->mX,
-                    ctx->d_x_check_offsets,
-                    ctx->d_x_check_edges,
-                    ctx->d_sx,
-                    ctx->d_x_v2c,
-                    ctx->d_x_c2v
-                );
-            } else {
-                check_update_x_kernel<<<x_blocks, threads, 0, stream>>>(
-                    ctx->x_edges,
-                    ctx->d_x_check_offsets,
-                    ctx->d_x_check_edges,
-                    ctx->d_x_edge_check,
-                    ctx->d_sx,
-                    ctx->d_x_v2c,
-                    ctx->d_x_c2v
-                );
-            }
-        }
-        if (run_z) {
-            if (use_prefix_z) {
-                check_update_z_by_check_kernel<<<ctx->mZ, check_z_threads, shared_z_bytes, stream>>>(
-                    ctx->mZ,
-                    ctx->d_z_check_offsets,
-                    ctx->d_z_check_edges,
-                    ctx->d_sz,
-                    ctx->d_z_v2c,
-                    ctx->d_z_c2v
-                );
-            } else {
-                check_update_z_kernel<<<z_blocks, threads, 0, stream>>>(
-                    ctx->z_edges,
-                    ctx->d_z_check_offsets,
-                    ctx->d_z_check_edges,
-                    ctx->d_z_edge_check,
-                    ctx->d_sz,
-                    ctx->d_z_v2c,
-                    ctx->d_z_c2v
-                );
-            }
+    auto enqueue_iter_kernels = [&](cudaStream_t stream) {
+        if (use_prefix) {
+            check_update_by_check_kernel<<<ctx->mAll, check_threads, shared_bytes, stream>>>(
+                ctx->mAll,
+                ctx->d_check_offsets,
+                ctx->d_check_edges,
+                ctx->mX,
+                ctx->d_sx,
+                ctx->d_sz,
+                ctx->d_v2c,
+                ctx->d_c2v,
+                ctx->d_freeze_x,
+                ctx->d_freeze_z
+            );
+        } else {
+            check_update_kernel<<<edge_blocks, threads, 0, stream>>>(
+                ctx->edges,
+                ctx->d_check_offsets,
+                ctx->d_check_edges,
+                ctx->d_edge_check,
+                ctx->mX,
+                ctx->d_sx,
+                ctx->d_sz,
+                ctx->d_v2c,
+                ctx->d_c2v,
+                ctx->d_freeze_x,
+                ctx->d_freeze_z
+            );
         }
         variable_update_kernel<<<var_blocks, threads, 0, stream>>>(
             ctx->nvars,
-            ctx->d_x_var_offsets,
-            ctx->d_x_var_edges,
-            ctx->d_z_var_offsets,
-            ctx->d_z_var_edges,
-            ctx->d_x_c2v,
-            ctx->d_z_c2v,
-            ctx->d_x_v2c,
-            ctx->d_z_v2c,
+            ctx->d_var_offsets,
+            ctx->d_var_edges,
+            ctx->d_edge_check,
+            ctx->mX,
+            ctx->d_c2v,
+            ctx->d_v2c,
             d_prior,
             damping,
             ctx->d_freeze_x,
@@ -831,24 +723,16 @@ bool cuda_bp_decode(
     auto enqueue_check_kernels = [&](cudaStream_t stream, std::string *err_out) -> bool {
         if (!check_cuda(cudaMemsetAsync(ctx->d_syn_x, 1, sizeof(int), stream), err_out, "memset syn_x")) return false;
         if (!check_cuda(cudaMemsetAsync(ctx->d_syn_z, 1, sizeof(int), stream), err_out, "memset syn_z")) return false;
-        syndrome_compare_kernel<<<check_x_blocks, threads, 0, stream>>>(
+        syndrome_compare_kernel<<<check_blocks, threads, 0, stream>>>(
+            ctx->mAll,
+            ctx->d_check_offsets,
+            ctx->d_check_edges,
+            ctx->d_edge_var,
+            ctx->d_est,
             ctx->mX,
-            ctx->d_x_check_offsets,
-            ctx->d_x_check_edges,
-            ctx->d_x_edge_var,
-            ctx->d_est,
             ctx->d_sx,
-            1,
-            ctx->d_syn_x
-        );
-        syndrome_compare_kernel<<<check_z_blocks, threads, 0, stream>>>(
-            ctx->mZ,
-            ctx->d_z_check_offsets,
-            ctx->d_z_check_edges,
-            ctx->d_z_edge_var,
-            ctx->d_est,
             ctx->d_sz,
-            0,
+            ctx->d_syn_x,
             ctx->d_syn_z
         );
         return true;
@@ -895,7 +779,7 @@ bool cuda_bp_decode(
                             "cudaStreamBeginCapture iter")) {
                 return false;
             }
-            enqueue_iter_kernels(stream, true, true);
+            enqueue_iter_kernels(stream);
             if (!check_cuda(cudaStreamEndCapture(stream, &ctx->iter_graph), error_out, "cudaStreamEndCapture iter")) {
                 return false;
             }
@@ -908,7 +792,7 @@ bool cuda_bp_decode(
                             "cudaStreamBeginCapture check")) {
                 return false;
             }
-            enqueue_iter_kernels(stream, true, true);
+            enqueue_iter_kernels(stream);
             if (!enqueue_check_kernels(stream, error_out)) return false;
             if (!check_cuda(cudaStreamEndCapture(stream, &ctx->check_graph), error_out, "cudaStreamEndCapture check")) {
                 return false;
@@ -946,8 +830,7 @@ bool cuda_bp_decode(
         if (!check_cuda(cudaEventCreate(&check_stop), error_out, "cudaEventCreate check stop")) return false;
     }
 
-    init_messages_kernel<<<x_blocks, threads, 0, stream>>>(ctx->x_edges, ctx->d_x_v2c, ctx->d_x_c2v, d_prior);
-    init_messages_kernel<<<z_blocks, threads, 0, stream>>>(ctx->z_edges, ctx->d_z_v2c, ctx->d_z_c2v, d_prior);
+    init_messages_kernel<<<edge_blocks, threads, 0, stream>>>(ctx->edges, ctx->d_v2c, ctx->d_c2v, d_prior);
     if (!check_cuda(cudaGetLastError(), error_out, "init_messages_kernel")) return false;
     double init_kernel_ms = 0.0;
     if (record_costs) {
@@ -984,7 +867,7 @@ bool cuda_bp_decode(
                 return false;
             }
         } else {
-            enqueue_iter_kernels(stream, !freeze_x, !freeze_z);
+            enqueue_iter_kernels(stream);
             if (!check_cuda(cudaGetLastError(), error_out, "bp_kernels")) return false;
             if (do_check) {
                 if (record_costs) {
@@ -1032,8 +915,9 @@ bool cuda_bp_decode(
                                      error_out, "copy freeze_x", nullptr)) {
                         return false;
                     }
-                    freeze_msgs_kernel<<<x_blocks, threads, 0, stream>>>(
-                        ctx->x_edges, ctx->d_x_edge_var, ctx->d_est, 1, ctx->d_x_v2c, ctx->d_x_c2v
+                    freeze_msgs_kernel<<<edge_blocks, threads, 0, stream>>>(
+                        ctx->edges, ctx->d_edge_var, ctx->d_edge_check, ctx->mX,
+                        ctx->d_est, 1, ctx->d_v2c, ctx->d_c2v
                     );
                 }
                 if (syn_z && !freeze_z) {
@@ -1043,8 +927,9 @@ bool cuda_bp_decode(
                                      error_out, "copy freeze_z", nullptr)) {
                         return false;
                     }
-                    freeze_msgs_kernel<<<z_blocks, threads, 0, stream>>>(
-                        ctx->z_edges, ctx->d_z_edge_var, ctx->d_est, 0, ctx->d_z_v2c, ctx->d_z_c2v
+                    freeze_msgs_kernel<<<edge_blocks, threads, 0, stream>>>(
+                        ctx->edges, ctx->d_edge_var, ctx->d_edge_check, ctx->mX,
+                        ctx->d_est, 0, ctx->d_v2c, ctx->d_c2v
                     );
                 }
                 if (!check_cuda(cudaGetLastError(), error_out, "freeze_msgs_kernel")) return false;
