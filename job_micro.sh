@@ -1,67 +1,45 @@
-#!/usr/bin/env bash
+#!/bin/bash
+#$ -S /bin/bash
+#$ -cwd
+#$ -N microbench
+#$ -l h_rt=00:05:00
+#$ -l gpu_1=1
+#$ -o logs/$JOB_NAME.$JOB_ID.out
+#$ -e logs/$JOB_NAME.$JOB_ID.err
+
 set -euo pipefail
 
-PARAMS="H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt"
-P="0.04"
-SEED="106"
-CUDA_DEVICE="0"
-MB_ITERS="100000"
-MODE="both"
+mkdir -p logs
 
-usage() {
-  echo "Usage: $0 [--p value] [--seed value] [--device N] [--iters N] [--mode iter|check|both]" >&2
-}
+echo "===== JOB START ====="
+date
+hostname
+echo "JOB_ID=$JOB_ID"
+echo "NSLOTS=${NSLOTS:-unset}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --p)
-      P="${2:-}"
-      shift 2
-      ;;
-    --seed)
-      SEED="${2:-}"
-      shift 2
-      ;;
-    --device)
-      CUDA_DEVICE="${2:-}"
-      shift 2
-      ;;
-    --iters)
-      MB_ITERS="${2:-}"
-      shift 2
-      ;;
-    --mode)
-      MODE="${2:-}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      usage
-      exit 1
-      ;;
-  esac
-done
+# load CUDA environment explicitly as it is required
+source /etc/profile.d/modules.sh || true
+module purge || true
+module load cuda || true
 
-common_args=(
-  --params "$PARAMS"
-  --simulate
-  --p "$P"
-  --seed "$SEED"
-  --no-pp
-  --cuda
-  --cuda-device "$CUDA_DEVICE"
-  --cuda-check-warmup 0
-  --cuda-check-interval 1
-  --cuda-microbench-mode "$MODE"
-  --cuda-microbench "$MB_ITERS"
-)
+# run experiments
 
-echo "[microbench] graph=1"
-./jointbp_ets "${common_args[@]}" --cuda-graph
-echo
-echo "[microbench] graph=0"
-./jointbp_ets "${common_args[@]}"
+## baseline
+nvcc -O2 -std=c++17 -DUSE_CUDA -o jointbp_ets jointbp_ets.cpp jointbp_cuda.cu
+
+echo "Running CUDA Micro benchmark with Graph"
+
+./jointbp_ets --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt \
+    --simulate --p 0.04 --seed 106 --no-pp --cuda --cuda-device 0 --cuda-graph \
+    --cuda-check-warmup 0 --cuda-check-interval 1 \
+    --cuda-microbench-mode both --cuda-microbench 100000
+
+echo "Running CUDA Micro benchmark without Graph"
+./jointbp_ets --params H_P768_J3_L12_dmax3_nc0-3_1-2_seed11579811919164041.txt \
+    --simulate --p 0.04 --seed 106 --no-pp --cuda --cuda-device 0 \
+    --cuda-check-warmup 0 --cuda-check-interval 1 \
+    --cuda-microbench-mode both --cuda-microbench 100000
+
+echo "===== JOB END ====="
+date
