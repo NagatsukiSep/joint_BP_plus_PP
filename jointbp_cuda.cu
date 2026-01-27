@@ -688,6 +688,8 @@ bool cuda_bp_decode(
     int check_interval,
     bool measure_costs,
     bool use_graph,
+    int microbench_iters,
+    int microbench_mode,
     bool freeze_syn,
     double damping,
     CudaBPResult &out,
@@ -959,6 +961,88 @@ bool cuda_bp_decode(
             return false;
         }
         init_kernel_ms = static_cast<double>(init_ms);
+    }
+
+    if (microbench_iters > 0 && microbench_mode != kCudaMicrobenchNone) {
+        auto destroy_event = [&](cudaEvent_t &evt, const char *label) -> bool {
+            if (evt) {
+                if (!check_cuda(cudaEventDestroy(evt), error_out, label)) return false;
+                evt = nullptr;
+            }
+            return true;
+        };
+        if (!destroy_event(kernel_start, "cudaEventDestroy bench kernel_start")) return false;
+        if (!destroy_event(kernel_stop, "cudaEventDestroy bench kernel_stop")) return false;
+        if (record_costs) {
+            if (!destroy_event(init_start, "cudaEventDestroy bench init_start")) return false;
+            if (!destroy_event(init_stop, "cudaEventDestroy bench init_stop")) return false;
+            if (!destroy_event(check_start, "cudaEventDestroy bench check_start")) return false;
+            if (!destroy_event(check_stop, "cudaEventDestroy bench check_stop")) return false;
+        }
+
+        auto run_bench = [&](bool is_iter, const char *label, auto &&launch) -> bool {
+            cudaEvent_t start{};
+            cudaEvent_t stop{};
+            if (!check_cuda(cudaEventCreate(&start), error_out, "cudaEventCreate bench start")) return false;
+            if (!check_cuda(cudaEventCreate(&stop), error_out, "cudaEventCreate bench stop")) return false;
+            if (!check_cuda(cudaEventRecord(start, stream), error_out, "cudaEventRecord bench start")) return false;
+            for (int i = 0; i < microbench_iters; ++i) {
+                if (!launch()) return false;
+            }
+            if (!check_cuda(cudaGetLastError(), error_out, label)) return false;
+            if (!check_cuda(cudaEventRecord(stop, stream), error_out, "cudaEventRecord bench stop")) return false;
+            if (!check_cuda(cudaEventSynchronize(stop), error_out, "cudaEventSync bench stop")) return false;
+            float ms = 0.0f;
+            if (!check_cuda(cudaEventElapsedTime(&ms, start, stop), error_out, "cudaEventElapsedTime bench")) {
+                return false;
+            }
+            if (!check_cuda(cudaEventDestroy(start), error_out, "cudaEventDestroy bench start")) return false;
+            if (!check_cuda(cudaEventDestroy(stop), error_out, "cudaEventDestroy bench stop")) return false;
+            if (is_iter) {
+                out.microbench_iter_ms = static_cast<double>(ms) / static_cast<double>(microbench_iters);
+            } else {
+                out.microbench_check_ms = static_cast<double>(ms) / static_cast<double>(microbench_iters);
+            }
+            return true;
+        };
+
+        if (microbench_mode & kCudaMicrobenchIter) {
+            auto launch_iter = [&]() -> bool {
+                if (use_graph) {
+                    if (!check_cuda(cudaGraphLaunch(ctx->iter_exec, stream), error_out,
+                                    "cudaGraphLaunch iter")) {
+                        return false;
+                    }
+                } else {
+                    enqueue_iter_kernels(stream, true, true);
+                }
+                return true;
+            };
+            if (!run_bench(true, "microbench_iter", launch_iter)) return false;
+        }
+        if (microbench_mode & kCudaMicrobenchCheck) {
+            auto launch_check = [&]() -> bool {
+                if (use_graph) {
+                    if (!check_cuda(cudaGraphLaunch(ctx->check_exec, stream), error_out,
+                                    "cudaGraphLaunch check")) {
+                        return false;
+                    }
+                } else {
+                    enqueue_iter_kernels(stream, true, true);
+                    if (!enqueue_check_kernels(stream, error_out)) return false;
+                }
+                return true;
+            };
+            if (!run_bench(false, "microbench_check", launch_check)) return false;
+        }
+        out.microbench_iters = microbench_iters;
+        out.kernel_ms = 0.0;
+        out.memcpy_ms = 0.0;
+        out.check_kernel_ms = 0.0;
+        out.check_memcpy_ms = 0.0;
+        out.init_kernel_ms = 0.0;
+        out.host_ms = 0.0;
+        return true;
     }
 
     bool freeze_x = false;

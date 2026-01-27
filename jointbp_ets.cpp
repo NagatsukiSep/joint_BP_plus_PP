@@ -4793,6 +4793,8 @@ static void print_usage(const char *prog) {
     std::cerr << "  --cuda-graph    Use CUDA Graphs to reduce launch overhead\n";
     std::cerr << "  --cuda-check-warmup N    Skip syndrome checks for first N iters (default: 0)\n";
     std::cerr << "  --cuda-check-interval N  Check syndrome every N iters (default: 1)\n";
+    std::cerr << "  --cuda-microbench N      Run CUDA microbench with N iterations and exit\n";
+    std::cerr << "  --cuda-microbench-mode iter|check|both (default: both)\n";
 
     print_help_section("ETS Files");
     std::cerr << "  --ets6-x FILE --ets6-z FILE\n";
@@ -4865,6 +4867,8 @@ int main(int argc, char **argv) {
     int cuda_check_interval = 1;
     bool cuda_costs = false;
     bool cuda_use_graph = false;
+    int cuda_microbench_iters = 0;
+    int cuda_microbench_mode = kCudaMicrobenchBoth;
     const bool enable_log_files = false;
     std::string progress_tsv_path;
     std::string hist_out_path;
@@ -4985,6 +4989,25 @@ int main(int argc, char **argv) {
             cuda_check_interval = std::stoi(argv[++i]);
             if (cuda_check_interval <= 0) {
                 cuda_check_interval = 1;
+            }
+        } else if (arg == "--cuda-microbench") {
+            need(1);
+            cuda_microbench_iters = std::stoi(argv[++i]);
+            if (cuda_microbench_iters < 0) {
+                cuda_microbench_iters = 0;
+            }
+        } else if (arg == "--cuda-microbench-mode") {
+            need(1);
+            std::string mode = argv[++i];
+            if (mode == "iter") {
+                cuda_microbench_mode = kCudaMicrobenchIter;
+            } else if (mode == "check") {
+                cuda_microbench_mode = kCudaMicrobenchCheck;
+            } else if (mode == "both") {
+                cuda_microbench_mode = kCudaMicrobenchBoth;
+            } else {
+                std::cerr << "Unknown --cuda-microbench-mode: " << mode << "\n";
+                return 1;
             }
         } else if (arg == "--trial-index") {
             need(1);
@@ -5484,6 +5507,56 @@ int main(int argc, char **argv) {
     Msg prior{1.0 - p_err, p_err / 3.0, p_err / 3.0, p_err / 3.0};
     normalize_msg(prior);
 
+    if (cuda_microbench_iters > 0) {
+        if (!cuda_ctx) {
+            std::cerr << "CUDA microbench requires CUDA BP (use --cuda and disable PP/verbose).\n";
+            return 1;
+        }
+        if (simulate) {
+            uint64_t trial_seed = trial_seed_from_base(seed, 0);
+            std::mt19937_64 rng(trial_seed);
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            err.assign(nvars, 0);
+            for (int i = 0; i < nvars; ++i) {
+                double u = dist(rng);
+                if (u < (1.0 - p_err)) {
+                    err[i] = 0;
+                } else {
+                    double v = (u - (1.0 - p_err)) / p_err;
+                    if (v < 1.0 / 3.0) err[i] = 1;
+                    else if (v < 2.0 / 3.0) err[i] = 2;
+                    else err[i] = 3;
+                }
+            }
+            sx = compute_syndrome(x_checks, err, true);
+            sz = compute_syndrome(z_checks, err, false);
+        }
+        CudaBPResult cuda_res;
+        CudaMsg cuda_prior{{prior[0], prior[1], prior[2], prior[3]}};
+        std::string cuda_error;
+        bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
+                                 cuda_check_warmup, cuda_check_interval,
+                                 false, cuda_use_graph,
+                                 cuda_microbench_iters, cuda_microbench_mode,
+                                 freeze_syn, damping, cuda_res, &cuda_error);
+        if (!ok) {
+            std::cerr << "CUDA microbench failed: " << cuda_error << "\n";
+            return 1;
+        }
+        print_stdout_section("CUDA Microbench");
+        std::cout << "graph=" << tf(cuda_use_graph) << "\n";
+        std::cout << "microbench_iters=" << cuda_res.microbench_iters << "\n";
+        if (cuda_microbench_mode & kCudaMicrobenchIter) {
+            std::cout << "microbench_iter_ms=" << std::setprecision(8) << std::fixed
+                      << cuda_res.microbench_iter_ms << "\n";
+        }
+        if (cuda_microbench_mode & kCudaMicrobenchCheck) {
+            std::cout << "microbench_check_ms=" << std::setprecision(8) << std::fixed
+                      << cuda_res.microbench_check_ms << "\n";
+        }
+        return 0;
+    }
+
     if (!simulate) {
         const std::vector<int> *truth_ptr = err_path.empty() ? nullptr : &err;
         bool pp_verbose = report_ets || verbose;
@@ -5499,6 +5572,7 @@ int main(int argc, char **argv) {
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
                                      cuda_costs, cuda_use_graph,
+                                     0, kCudaMicrobenchNone,
                                      freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";
@@ -5957,6 +6031,7 @@ int main(int argc, char **argv) {
             bool ok = cuda_bp_decode(cuda_ctx.get(), sx, sz, cuda_prior, max_iter,
                                      cuda_check_warmup, cuda_check_interval,
                                      cuda_costs, cuda_use_graph,
+                                     0, kCudaMicrobenchNone,
                                      freeze_syn, damping, cuda_res, &cuda_error);
             if (!ok) {
                 std::cerr << "CUDA decode failed: " << cuda_error << " (falling back to CPU)\n";

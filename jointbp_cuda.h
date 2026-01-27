@@ -40,9 +40,19 @@ struct CudaBPResult {
     double check_memcpy_ms = 0.0;
     double init_kernel_ms = 0.0;
     double host_ms = 0.0;
+    int microbench_iters = 0;
+    double microbench_iter_ms = 0.0;
+    double microbench_check_ms = 0.0;
 };
 
 struct CudaBPContext;
+
+enum CudaMicrobenchMode {
+    kCudaMicrobenchNone = 0,
+    kCudaMicrobenchIter = 1 << 0,
+    kCudaMicrobenchCheck = 1 << 1,
+    kCudaMicrobenchBoth = kCudaMicrobenchIter | kCudaMicrobenchCheck
+};
 
 #ifdef USE_CUDA
 CudaBPContext *cuda_bp_create(const CudaBPGraph &graph, int device_id, std::string *error_out);
@@ -57,6 +67,8 @@ bool cuda_bp_decode(
     int check_interval,
     bool measure_costs,
     bool use_graph,
+    int microbench_iters,
+    int microbench_mode,
     bool freeze_syn,
     double damping,
     CudaBPResult &out,
@@ -80,6 +92,8 @@ inline bool cuda_bp_decode(
     int,
     bool,
     bool,
+    int,
+    int,
     bool,
     double,
     CudaBPResult &,
